@@ -9,10 +9,13 @@ import dotenv from 'dotenv';
 import connectDB from './config/database.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
+import { clerkMiddleware } from '@clerk/express';
 
 // Import routes
 import healthRoutes from './routes/health.js';
 import userRoutes from './routes/user.routes.js';
+import triproute from './routes/trip.routes.js';
+
 
 dotenv.config();
 
@@ -25,6 +28,7 @@ connectDB();
 // Security middleware
 app.use(helmet());
 app.use(cors());
+app.use(clerkMiddleware())
 
 // Rate limiting
 const limiter = rateLimit({
@@ -51,6 +55,8 @@ if (process.env.NODE_ENV === 'development') {
 // Routes
 app.use('/api/health', healthRoutes);
 app.use('/api/users', userRoutes);
+app.use("/api/trips", triproute)
+
 // Root route
 app.get('/', (req, res) => {
   res.json({
