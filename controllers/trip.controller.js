@@ -40,7 +40,10 @@ export const createTrip = async (req, res, next) => {
         },
       ],
     });
-
+    const populatedTrip = await trip.populate([
+      {path: "createdBy", select: "name email imageUrl"},
+      {path: "members.user", select: "name email imageUrl"},
+    ])
     res.status(201).json({
       success: true,
       data: trip,
@@ -80,11 +83,14 @@ export const joinTrip = async (req, res, next) => {
       role: "viewer", // default
     });
 
-    await trip.save();
-
-    res.json({
+    const newTrip = await trip.save();
+    const populatedTrip = await newTrip.populate([
+      {path: "createdBy", select: "name email imageUrl"},
+      {path: "members.user", select: "name email imageUrl"},
+    ])
+    return res.json({
       success: true,
-      data: trip,
+      data: populatedTrip,
     });
   } catch (error) {
     next(error);
@@ -104,7 +110,7 @@ export const updateTrip = async (req, res, next) => {
 
     await trip.save();
 
-    res.json({
+    return res.json({
       success: true,
       data: trip,
     });
@@ -136,7 +142,7 @@ export const updateMemberRole = async (req, res, next) => {
 
     await trip.save();
 
-    res.json({
+    return res.json({
       success: true,
       data: trip,
     });
