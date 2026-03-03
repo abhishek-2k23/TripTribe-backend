@@ -6,10 +6,8 @@ export const syncUser = async (req, res) => {
   try {
 
     const { userId } = req.auth();
-    console.log("userId: ", userId)
     // Fetch full user info from Clerk directly
     const clerkUser = await clerkClient.users.getUser(userId)
-    console.log("clerk User: ", clerkUser)
     let user = await User.findOne({ clerkId: userId })
 
     if (!user) {
@@ -19,7 +17,6 @@ export const syncUser = async (req, res) => {
         name: `${clerkUser.firstName || ""} ${clerkUser.lastName || ""}`,
         imageUrl: clerkUser.imageUrl,
       })
-      console.log(user);
 
       return res.status(201).json({
         success: true,
