@@ -152,7 +152,11 @@ export const getMyTrips = async (req, res, next) => {
     const trips = await Trip.find({
       "members.user": userId,
     })
-      .populate("createdBy", "name email")
+      .populate("createdBy", "name email imageUrl")
+      .populate({
+        path: "members.user",
+        select: "name email imageUrl" 
+      })
       .sort({ createdAt: -1 });
 
     res.status(200).json({

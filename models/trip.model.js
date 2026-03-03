@@ -33,7 +33,10 @@ const tripSchema = new mongoose.Schema(
       required: true,
     },
     description: String,
-    imageUrl: String,
+    image: {
+      url: String,
+      public_id: String,
+    },
 
     inviteCode: {
       type: String,
@@ -72,10 +75,10 @@ tripSchema.pre("save", function (next) {
 tripSchema.pre("validate", function (next) {
   if (this.startDate && this.endDate) {
     if (this.endDate < this.startDate) {
-      next(new Error("End date cannot be before start date"));
+      next(new Error("End date cannot be before start date"))
     }
   }
-  next();
-});
+  next()
+})
 
 export default mongoose.model("Trip", tripSchema)
