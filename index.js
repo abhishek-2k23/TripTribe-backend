@@ -15,6 +15,9 @@ import { clerkMiddleware } from '@clerk/express';
 import healthRoutes from './routes/health.js';
 import userRoutes from './routes/user.routes.js';
 import triproute from './routes/trip.routes.js';
+import ItineraryModel from './models/Itinerary.model.js';
+import itinerary from './routes/itinerary.routes.js';
+import expense from './routes/expense.routes.js';
 
 
 dotenv.config();
@@ -56,6 +59,8 @@ if (process.env.NODE_ENV === 'development') {
 app.use('/api/health', healthRoutes);
 app.use('/api/users', userRoutes);
 app.use("/api/trips", triproute)
+app.use("/api/itinerary", itinerary)
+app.use("/api/expense", expense)
 
 // Root route
 app.get('/', (req, res) => {
