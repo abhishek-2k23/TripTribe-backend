@@ -60,7 +60,7 @@ app.use('/api/health', healthRoutes);
 app.use('/api/users', userRoutes);
 app.use("/api/trips", triproute)
 app.use("/api/itinerary", itinerary)
-app.use("/api/expense", expense)
+app.use("/api/expenses", expense)
 
 // Root route
 app.get('/', (req, res) => {
