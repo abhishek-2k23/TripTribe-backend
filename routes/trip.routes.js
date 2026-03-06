@@ -1,5 +1,5 @@
 import express from "express";
-import { createTrip, getMyTrips, joinTrip, updateMemberRole, updateTrip } from "../controllers/trip.controller.js";
+import { createTrip, getMyTrips, getSingleTrip, joinTrip, updateMemberRole, updateTrip } from "../controllers/trip.controller.js";
 import { protect } from "../middleware/auth.js";
 import { authorizeTripRole } from "../middleware/tripRole.middleware.js";
 
@@ -22,4 +22,5 @@ router.patch(
 
 //get my trips 
 router.get("/my-trips", protect, getMyTrips);
+router.get("/:tripId", protect, getSingleTrip);
 export default router;

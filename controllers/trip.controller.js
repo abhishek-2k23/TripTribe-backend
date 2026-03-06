@@ -97,25 +97,51 @@ export const joinTrip = async (req, res, next) => {
   }
 };
 
-export const updateTrip = async (req, res, next) => {
+export const updateTrip = async (req, res) => {
   try {
-    const trip = req.trip;
+    const { tripId } = req.params;
+    const { tripName, startDate, endDate, members, coverImage } = req.body;
+    console.log(tripId);
+    // 1. Validate if trip exists
+    const trip = await Trip.findById(tripId);
+    if (!trip) {
+      return res.status(404).json({ success: false, message: "Trip not found" });
+    }
 
-    const { name, location, description, imageUrl } = req.body;
+    const formattedMembers = members.map((m) => ({
+      user: m._id,
+      role: m.role,
+    }));
 
-    if (name) trip.name = name;
-    if (location) trip.location = location;
-    if (description) trip.description = description;
-    if (imageUrl) trip.imageUrl = imageUrl;
+    // 3. Update the trip
+    const updatedTrip = await Trip.findByIdAndUpdate(
+      tripId,
+      {
+        $set: {
+          name: tripName,
+          startDate: new Date(startDate),
+          endDate: new Date(endDate),
+          members: formattedMembers,
+          "image.url": coverImage, // Updates the nested image.url field
+        },
+      },
+      { 
+        new: true, // Return the updated document
+        runValidators: true // Ensure date validation (endDate > startDate) runs
+      }
+    ).populate("members.user", "name email imageUrl");
 
-    await trip.save();
-
-    return res.json({
+    res.status(200).json({
       success: true,
-      data: trip,
+      message: "Trip updated successfully",
+      data: updatedTrip,
     });
   } catch (error) {
-    next(error);
+    console.error("Update Trip Error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Internal Server Error",
+    });
   }
 };
 
@@ -169,6 +195,37 @@ export const getMyTrips = async (req, res, next) => {
       success: true,
       count: trips.length,
       data: trips,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getSingleTrip = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { tripId } = req.params;
+
+    const trip = await Trip.findOne({
+      _id: tripId,
+      "members.user": userId  
+    })
+      .populate("createdBy", "name email imageUrl")
+      .populate({
+        path: "members.user",
+        select: "name email imageUrl"
+      });
+
+    if (!trip) {
+      return res.status(404).json({
+        success: false,
+        message: "Trip not found or access denied",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: trip,  
     });
   } catch (error) {
     next(error);
