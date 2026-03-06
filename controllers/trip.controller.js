@@ -100,7 +100,7 @@ export const joinTrip = async (req, res, next) => {
 export const updateTrip = async (req, res) => {
   try {
     const { tripId } = req.params;
-    const { tripName, startDate, endDate, members, coverImage } = req.body;
+    const { tripName, startDate, endDate, members, coverImage, description } = req.body;
     console.log(tripId);
     // 1. Validate if trip exists
     const trip = await Trip.findById(tripId);
@@ -119,15 +119,16 @@ export const updateTrip = async (req, res) => {
       {
         $set: {
           name: tripName,
+          description: description,
           startDate: new Date(startDate),
           endDate: new Date(endDate),
           members: formattedMembers,
-          "image.url": coverImage, // Updates the nested image.url field
+          "image.url": coverImage, 
         },
       },
       { 
-        new: true, // Return the updated document
-        runValidators: true // Ensure date validation (endDate > startDate) runs
+        new: true,
+        runValidators: true 
       }
     ).populate("members.user", "name email imageUrl");
 

@@ -18,6 +18,7 @@ import triproute from './routes/trip.routes.js';
 import ItineraryModel from './models/Itinerary.model.js';
 import itinerary from './routes/itinerary.routes.js';
 import expense from './routes/expense.routes.js';
+import checklistRouter from './routes/checklist.router.js';
 
 
 dotenv.config();
@@ -61,6 +62,7 @@ app.use('/api/users', userRoutes);
 app.use("/api/trips", triproute)
 app.use("/api/itinerary", itinerary)
 app.use("/api/expenses", expense)
+app.use("/api/checklist", checklistRouter)
 
 // Root route
 app.get('/', (req, res) => {

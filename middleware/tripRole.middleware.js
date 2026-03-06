@@ -3,7 +3,7 @@ import Trip from "../models/trip.model.js";
 export const authorizeTripRole = (allowedRoles) => {
   return async (req, res, next) => {
     const { tripId } = req.params;
-
+    console.log("On authorize")
     const trip = await Trip.findById(tripId);
 
     if (!trip) {
