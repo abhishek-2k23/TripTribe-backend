@@ -55,6 +55,19 @@ const tripSchema = new mongoose.Schema(
       type: Date,
       required: true,
     },
+    
+    budget: {
+      total: { type: Number, default: 6000 },
+      currency: { type: String, default: "INR" },
+      categories: {
+        Food: { type: Number, default: 1000 },
+        Transport: { type: Number, default: 1000 },
+        Activities: { type: Number, default: 1000 },
+        Hotel: { type: Number, default: 1000 },
+        Shopping: { type: Number, default: 1000 },
+        Other: { type: Number, default: 1000 },
+      }
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

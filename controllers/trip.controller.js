@@ -6,15 +6,38 @@ export const createTrip = async (req, res, next) => {
       name,
       location,
       description,
-      imageUrl,
+      image,
       startDate,
       endDate,
     } = req.body;
-
-    if (!name || !location || !startDate || !endDate) {
+    if (!name ) {
       return res.status(400).json({
         success: false,
-        message: "Name, location, start date and end date are required",
+        message: "Name is required",
+      });
+    }
+    if (!location ) {
+      return res.status(400).json({
+        success: false,
+        message: "location is required",
+      });
+    }
+    if (!startDate ) {
+      return res.status(400).json({
+        success: false,
+        message: "start date is required",
+      });
+    }
+    if (!endDate ) {
+      return res.status(400).json({
+        success: false,
+        message: "end date is required",
+      });
+    }
+    if(!image){
+      return res.status(400).json({
+        success: false,
+        message: " image is required",
       });
     }
 
@@ -29,7 +52,7 @@ export const createTrip = async (req, res, next) => {
       name,
       location,
       description,
-      imageUrl,
+      image,
       startDate,
       endDate,
       createdBy: req.user._id,
@@ -101,29 +124,34 @@ export const updateTrip = async (req, res) => {
   try {
     const { tripId } = req.params;
     const { tripName, startDate, endDate, members, coverImage, description } = req.body;
-    console.log(tripId);
+
+    console.log(tripId, req.body);
     // 1. Validate if trip exists
     const trip = await Trip.findById(tripId);
     if (!trip) {
       return res.status(404).json({ success: false, message: "Trip not found" });
     }
 
-    const formattedMembers = members.map((m) => ({
+    let formattedMembers;
+    if(members && members.length > 0){
+
+      formattedMembers = members.map((m) => ({
       user: m._id,
       role: m.role,
     }));
+    }
 
     // 3. Update the trip
     const updatedTrip = await Trip.findByIdAndUpdate(
       tripId,
       {
         $set: {
-          name: tripName,
-          description: description,
-          startDate: new Date(startDate),
-          endDate: new Date(endDate),
-          members: formattedMembers,
-          "image.url": coverImage, 
+          name: tripName || trip.name,
+          description: description || trip.description,
+          startDate: new Date(startDate) || trip.startDate,
+          endDate: new Date(endDate) || trip.endDate,
+          members: formattedMembers || trip.members,
+          "image.url": coverImage.url, 
         },
       },
       { 
@@ -227,6 +255,37 @@ export const getSingleTrip = async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: trip,  
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// trip.controller.js
+export const updateTripBudget = async (req, res, next) => {
+  try {
+    const { tripId } = req.params;
+    const { total, categories } = req.body;
+
+    const updatedTrip = await Trip.findByIdAndUpdate(
+      tripId,
+      {
+        $set: {
+          "budget.total": total,
+          "budget.categories": categories 
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedTrip) {
+      return res.status(404).json({ success: false, message: "Trip not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Budget updated successfully",
+      data: updatedTrip.budget
     });
   } catch (error) {
     next(error);
