@@ -17,9 +17,9 @@ export const addExpense = async (req, res, next) => {
     } = req.body;
 
     const recorder = req.user._id;
-
+    console.log(req.body);
+    console.log(tripId);
     const trip = await Trip.findById(tripId);
-
     if (!trip) {
       return res.status(404).json({
         success: false,
@@ -295,4 +295,62 @@ export const settleDebt = async (req, res, next) => {
     next(error);
   }
 
+};
+
+export const getBudgetDashboard = async (req, res, next) => {
+  try {
+    const { tripId } = req.params;
+
+    const trip = await Trip.findById(tripId).select("budget");
+    if (!trip) return res.status(404).json({ success: false, message: "Trip not found" });
+
+    const stats = await Expense.aggregate([
+      { $match: { trip: new mongoose.Types.ObjectId(tripId) } },
+      {
+        $group: {
+          _id: "$category",
+          spent: { $sum: "$amount" }
+        }
+      }
+    ]);
+
+    const categoryBreakdown = Object.keys(trip.budget.categories).map(cat => {
+      const spentData = stats.find(s => s._id === cat);
+      const spent = spentData ? spentData.spent : 0;
+      const limit = trip.budget.categories[cat] || 0;
+      
+      return {
+        category: cat,
+        spent,
+        limit,
+        percentage: limit > 0 ? Math.min(100, (spent / limit) * 100) : 0
+      };
+    });
+
+    const totalSpent = categoryBreakdown.reduce((acc, curr) => acc + curr.spent, 0);
+
+    const recentExpenses = await Expense.find({ trip: tripId })
+      .sort({ expenseDate: -1 })
+      .limit(5)
+      .populate("paidBy", "name imageUrl") 
+      .populate("participants", "name imageUrl") 
+      .populate({
+        path: "splitDetails.user",
+        select: "name imageUrl"
+      });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalBudget: trip.budget.total,
+        totalSpent,
+        remaining: Math.max(0, trip.budget.total - totalSpent),
+        utilization: trip.budget.total > 0 ? (totalSpent / trip.budget.total) * 100 : 0,
+        categories: categoryBreakdown,
+        recentExpenses
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
 };
