@@ -111,6 +111,11 @@ export const joinTrip = async (req, res, next) => {
       {path: "createdBy", select: "name email imageUrl"},
       {path: "members.user", select: "name email imageUrl"},
     ])
+
+    const io = req.app.get("socketio");
+
+    io.to(trip._id.toString()).emit("member_joined", populatedTrip);
+
     return res.json({
       success: true,
       data: populatedTrip,
