@@ -78,6 +78,15 @@ export const addExpense = async (req, res, next) => {
       splitDetails
     });
 
+    const populatedExpense = await expense.populate([
+  { path: "paidBy", select: "name imageUrl" },
+  { path: "participants", select: "name imageUrl" }
+]);
+    const io = req.app.get("socketio");
+    if (io) {
+      io.to(tripId.toString()).emit("expense_added", populatedExpense);
+    }
+
     res.status(201).json({
       success: true,
       data: expense
