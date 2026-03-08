@@ -30,6 +30,13 @@ export const addActivity = async (req, res, next) => {
       }
       
       await dayPlan.save();
+
+      const io = req.app.get("socketio");
+      const roomName = tripId.toString(); 
+
+      console.log(`Emitting activity_added to room: ${roomName}`);
+      io.to(tripId).emit("activity_added", dayPlan);
+
     }
 
     res.status(201).json({
