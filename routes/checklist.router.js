@@ -6,7 +6,7 @@ const checklistRouter = express.Router();
 
 checklistRouter.post("/addItems/:tripId", protect, authorizeTripRole(["owner", "editor"]),  bulkAddChecklistItems);
 checklistRouter.get("/fetchLists/:tripId", getTripChecklist)
-checklistRouter.patch(
+checklistRouter.post(
   "/:tripId/checklist/:categoryId/items/:itemId", 
   protect, 
   toggleItem
