@@ -16,10 +16,10 @@ itinerary.post("/addActivity", addActivity);
 
 itinerary.get("/getTripItinerary/:tripId", protect, getTripItinerary);
 
-itinerary.patch("/activity/status", toggleActivityStatus);
+itinerary.post("/activity/status", toggleActivityStatus);
 
 itinerary.post("/activity/comment", addActivityComment);
 
-itinerary.delete("/activity/:itineraryId/:activityId", deleteActivity);
+itinerary.delete("/activity/:itineraryId/:activityId/:tripId", deleteActivity);
 
 export default itinerary;

@@ -30,14 +30,13 @@ export const addActivity = async (req, res, next) => {
       }
       
       await dayPlan.save();
+    }
 
-      const io = req.app.get("socketio");
+    const io = req.app.get("socketio");
       const roomName = tripId.toString(); 
 
       console.log(`Emitting activity_added to room: ${roomName}`);
       io.to(tripId).emit("activity_added", dayPlan);
-
-    }
 
     res.status(201).json({
       success: true,
@@ -48,11 +47,11 @@ export const addActivity = async (req, res, next) => {
     next(error);
   }
 };
+
 export const toggleActivityStatus = async (req, res, next) => {
   try {
-    const { itineraryId, activityId, isDone } = req.body;
+    const { itineraryId, activityId, isDone, tripId } = req.body;
 
-    // We find the document by ID, then look into the nested sections and activities
     const updated = await Itinerary.findOneAndUpdate(
       { _id: itineraryId, "sections.activities._id": activityId },
       { $set: { "sections.$[].activities.$[act].isDone": isDone } },
@@ -60,16 +59,14 @@ export const toggleActivityStatus = async (req, res, next) => {
         arrayFilters: [{ "act._id": activityId }],
         new: true 
       }
-    );
+    ).populate("sections.activities.comments.user", "name imageUrl");
 
-    if (!updated) {
-      return res.status(404).json({ success: false, message: "Activity not found" });
-    }
+    // Emit to Socket Room
+    const io = req.app.get("socketio");
+    io.to(tripId).emit("activity_updated", updated);
 
     res.status(200).json({ success: true, data: updated });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 };
 
 export const addActivityComment = async (req, res, next) => {
@@ -99,22 +96,22 @@ export const addActivityComment = async (req, res, next) => {
 
 export const deleteActivity = async (req, res, next) => {
   try {
-    const { itineraryId, activityId } = req.params;
+    const { itineraryId, activityId, tripId } = req.params; // Ensure tripId is passed or fetched
 
-    // $pull removes the object from the activities array that matches the _id
-    const result = await Itinerary.updateOne(
+    const result = await Itinerary.findOneAndUpdate(
       { _id: itineraryId },
-      { $pull: { "sections.$[].activities": { _id: activityId } } }
-    );
+      { $pull: { "sections.$[].activities": { _id: activityId } } },
+      { new: true } // Return the updated day plan
+    ).populate("sections.activities.comments.user", "name imageUrl");
 
-    if (result.modifiedCount === 0) {
-      return res.status(404).json({ success: false, message: "Activity not found" });
-    }
+    if (!result) return res.status(404).json({ success: false });
 
-    res.status(200).json({ success: true, message: "Activity deleted successfully" });
-  } catch (error) {
-    next(error);
-  }
+    // Emit to Socket Room
+    const io = req.app.get("socketio");
+    io.to(tripId).emit("activity_deleted", { itineraryId, activityId });
+
+    res.status(200).json({ success: true, data: result });
+  } catch (error) { next(error); }
 };
 
 
@@ -138,11 +135,23 @@ export const getTripItinerary = async (req, res, next) => {
       });
     }
 
+    const sectionTitles = new Set();
+    
+    itinerary.forEach(day => {
+      day.sections.forEach(sec => {
+        if (sec.section) {
+          sectionTitles.add(sec.section);
+        }
+      });
+    });
+
     res.status(200).json({
       success: true,
       count: itinerary.length,
-      data: itinerary
-    });
+      data: {
+        itinerary: itinerary,             
+        existingSections: Array.from(sectionTitles)} 
+      });
   } catch (error) {
     console.error("Error fetching itinerary:", error);
     next(error);
