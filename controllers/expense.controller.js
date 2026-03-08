@@ -88,98 +88,6 @@ export const addExpense = async (req, res, next) => {
   }
 };
 
-export const getTripBudgetSummary = async (req, res, next) => {
-  try {
-    const { tripId } = req.params;
-    const userId = req.user._id;
-
-    const trip = await Trip.findOne({
-      _id: tripId,
-      "members.user": userId,
-    });
-
-    if (!trip) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
-    }
-
-    const stats = await Expense.aggregate([
-      {
-        $match: {
-          trip: new mongoose.Types.ObjectId(tripId),
-        },
-      },
-      {
-        $group: {
-          _id: "$category",
-          totalAmount: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    const totalSpent = stats.reduce(
-      (acc, curr) => acc + curr.totalAmount,
-      0
-    );
-
-    const recentExpenses = await Expense.find({ trip: tripId })
-      .populate("paidBy", "name email imageUrl")
-      .sort({ expenseDate: -1 })
-      .limit(5);
-
-    res.status(200).json({
-      success: true,
-      data: {
-        totalSpent,
-        categoryBreakdown: stats,
-        recentExpenses,
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const settleExpense = async (req, res, next) => {
-  try {
-    const { expenseId, userId } = req.body;
-
-    const expense = await Expense.findById(expenseId);
-
-    if (!expense) {
-      return res.status(404).json({
-        success: false,
-        message: "Expense not found",
-      });
-    }
-
-    const split = expense.splitDetails.find(
-      (s) => s.user.toString() === userId
-    );
-
-    if (!split) {
-      return res.status(404).json({
-        success: false,
-        message: "Split not found",
-      });
-    }
-
-    split.isSettled = true;
-
-    await expense.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Payment settled",
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
 export const getTripDebts = async (req, res, next) => {
   try {
     const { tripId } = req.params;
@@ -233,7 +141,9 @@ export const getTripDebts = async (req, res, next) => {
           from: debtor,
           to: payer,
           amount,
-          title: expense.title
+          title: expense.title,
+          recordedBy: expense.recordedBy,
+          expenseId: expense._id
         });
 
       });
@@ -271,7 +181,7 @@ export const settleDebt = async (req, res, next) => {
     const { expenseId, userId } = req.body;
 
     const expense = await Expense.findById(expenseId);
-
+    console.log(expense);
     const split = expense.splitDetails.find(
       s => s.user.toString() === userId
     );
