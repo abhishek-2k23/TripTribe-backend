@@ -5,85 +5,98 @@ import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import { Server } from "socket.io";
+import http from "http";
 
 import connectDB from './config/database.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { notFound } from './middleware/notFound.js';
 import { clerkMiddleware } from '@clerk/express';
 
-// Import routes
+// Route Imports
 import healthRoutes from './routes/health.js';
 import userRoutes from './routes/user.routes.js';
 import triproute from './routes/trip.routes.js';
-import ItineraryModel from './models/Itinerary.model.js';
 import itinerary from './routes/itinerary.routes.js';
 import expense from './routes/expense.routes.js';
 import checklistRouter from './routes/checklist.router.js';
-import fileRouter  from './routes/uploadRoutes.js';
-
+import fileRouter from './routes/uploadRoutes.js';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Connect to MongoDB
+// 1. Create HTTP Server
+const server = http.createServer(app);
+
+// 2. Initialize Socket.io
+const io = new Server(server, {
+  cors: {
+    origin: process.env.CLIENT_URL || "*",
+    methods: ["GET", "POST"]
+  }
+});
+
+
+app.set("socketio", io);
+
 connectDB();
 
-// Security middleware
+// Middleware
 app.use(helmet());
 app.use(cors());
-app.use(clerkMiddleware())
+app.use(clerkMiddleware());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(compression());
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
+  windowMs: 5 * 60 * 1000, 
+  max: 100,
+  message: 'Too many requests, please try again later.'
 });
-app.use(limiter);
+app.use('/api', limiter); 
 
-// Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Compression middleware
-app.use(compression());
-
-// Logging middleware
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
-} else {
-  app.use(morgan('combined'));
 }
+
+// 4. Socket Connection Logic
+io.on("connection", (socket) => {
+  console.log("User Connected:", socket.id);
+
+  socket.on("join_trip", (tripId) => {
+    socket.join(tripId);
+    console.log(`User joined trip room: ${tripId}`);
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User Disconnected");
+  });
+});
 
 // Routes
 app.use('/api/health', healthRoutes);
 app.use('/api/users', userRoutes);
-app.use("/api/trips", triproute)
-app.use("/api/itinerary", itinerary)
-app.use("/api/expenses", expense)
-app.use("/api/checklist", checklistRouter)
-app.use("/api/files", fileRouter)
+app.use("/api/trips", triproute);
+app.use("/api/itinerary", itinerary);
+app.use("/api/expenses", expense);
+app.use("/api/checklist", checklistRouter);
+app.use("/api/files", fileRouter);
 
-// Root route
 app.get('/', (req, res) => {
-  res.json({
-    message: 'Trip Planner Server',
-    version: '1.0.0',
-    status: 'running'
-  });
+  res.json({ message: 'Trip Planner Server', status: 'running' });
 });
 
-// Error handling middleware
 app.use(notFound);
 app.use(errorHandler);
 
-// Start server
-app.listen(PORT, () => {
+
+server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
 });
 
 export default app;
