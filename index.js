@@ -21,6 +21,7 @@ import itinerary from './routes/itinerary.routes.js';
 import expense from './routes/expense.routes.js';
 import checklistRouter from './routes/checklist.router.js';
 import fileRouter from './routes/uploadRoutes.js';
+import messageRouter from './routes/message.router.js';
 
 dotenv.config();
 
@@ -72,6 +73,16 @@ io.on("connection", (socket) => {
     console.log(`User joined trip room: ${tripId}`);
   });
 
+  socket.on("typing_start", ({ tripId, userName }) => {
+    // Broadcast to everyone in the trip EXCEPT the sender
+    socket.to(tripId).emit("user_typing", { userName, isTyping: true });
+  });
+
+  // When a user stops typing
+  socket.on("typing_stop", ({ tripId }) => {
+    socket.to(tripId).emit("user_typing", { isTyping: false });
+  });
+
   socket.on("disconnect", () => {
     console.log("User Disconnected");
   });
@@ -85,6 +96,7 @@ app.use("/api/itinerary", itinerary);
 app.use("/api/expenses", expense);
 app.use("/api/checklist", checklistRouter);
 app.use("/api/files", fileRouter);
+app.use("/api/discussion", messageRouter)
 
 app.get('/', (req, res) => {
   res.json({ message: 'Trip Planner Server', status: 'running' });
