@@ -22,6 +22,7 @@ import expense from './routes/expense.routes.js';
 import checklistRouter from './routes/checklist.router.js';
 import fileRouter from './routes/uploadRoutes.js';
 import messageRouter from './routes/message.router.js';
+import scalarDocsRouter from './docs/scalar.js';
 
 dotenv.config();
 
@@ -51,6 +52,9 @@ app.use(clerkMiddleware());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(compression());
+
+// Interactive OpenAPI reference for frontend and API consumers.
+app.use('/api-docs', scalarDocsRouter);
 
 // Rate limiting
 const limiter = rateLimit({
@@ -99,7 +103,11 @@ app.use("/api/files", fileRouter);
 app.use("/api/discussion", messageRouter)
 
 app.get('/', (req, res) => {
-  res.json({ message: 'Trip Planner Server', status: 'running' });
+  res.json({
+    message: 'Trip Planner Server',
+    status: 'running',
+    documentation: '/api-docs',
+  });
 });
 
 app.use(notFound);

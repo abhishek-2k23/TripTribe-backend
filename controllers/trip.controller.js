@@ -93,6 +93,8 @@ export const joinTrip = async (req, res, next) => {
     const alreadyMember = trip.members.some(
       (m) => m.user.toString() === req.user._id.toString()
     );
+    
+    console.log(req.user.name)
 
     if (alreadyMember) {
       return res.status(400).json({
@@ -114,7 +116,7 @@ export const joinTrip = async (req, res, next) => {
 
     const io = req.app.get("socketio");
 
-    io.to(trip._id.toString()).emit("member_joined", populatedTrip);
+    io.to(trip._id.toString()).emit("member_joined", {populatedTrip, name: req.user.name});
 
     return res.json({
       success: true,
