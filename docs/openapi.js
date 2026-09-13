@@ -151,6 +151,53 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
           ...standardErrors,
         },
       },
+      delete: {
+        tags: ["Users"],
+        operationId: "deleteMyAccount",
+        summary: "Delete the current user's account",
+        description:
+          "Anonymizes the local user (name becomes \"Deleted user\"; email, photo and Clerk id are erased), deletes their messages, activity comments, checklist ticks and uploaded files, deletes trips where they are the only member, transfers ownership of shared trips to the longest-standing editor (or member), keeps shared expense records attributed to the anonymized user, then deletes the Clerk user. Responds 502 with the summary if only the Clerk deletion failed; signing in again and repeating the call finishes it.",
+        responses: {
+          200: jsonResponse("Account deleted.", {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              message: { type: "string" },
+              data: {
+                type: "object",
+                properties: {
+                  tripsDeleted: { type: "array", items: { type: "object" } },
+                  ownershipTransferred: { type: "array", items: { type: "object" } },
+                  tripsLeft: { type: "array", items: { type: "object" } },
+                  messagesDeleted: { type: "integer" },
+                  filesDeleted: { type: "integer" },
+                  expensesKept: { type: "integer" },
+                  assetsDestroyed: { type: "integer" },
+                  signInAccountDeleted: { type: "boolean" },
+                },
+              },
+            },
+          }),
+          502: jsonResponse("Data deleted but the Clerk user could not be removed.", {
+            type: "object",
+            properties: { success: { type: "boolean" }, message: { type: "string" }, data: { type: "object" } },
+          }),
+          ...standardErrors,
+        },
+      },
+    },
+    "/users/me/export": {
+      get: {
+        tags: ["Users"],
+        operationId: "exportMyData",
+        summary: "Export the current user's data",
+        description:
+          "Returns the user's profile, trip memberships (own role only), messages, activity comments, completed checklist items, expenses they paid or share in (own share only) and uploaded files.",
+        responses: {
+          200: jsonResponse("Data export.", successEnvelope({ type: "object" })),
+          ...standardErrors,
+        },
+      },
     },
     "/users/update": {
       put: {
