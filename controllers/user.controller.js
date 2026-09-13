@@ -1,11 +1,21 @@
 // controllers/userController.js
 
 import User from "../models/user.model.js"
-import { clerkClient } from "@clerk/express";
+import { clerkClient, getAuth } from "@clerk/express";
 export const syncUser = async (req, res) => {
   try {
 
-    const { userId } = req.auth();
+    const { userId } = getAuth(req)
+
+    // This route deliberately sits outside `protect` — it is what creates the Mongo user
+    // that `protect` looks up — so it has to do its own signed-in check. Without it an
+    // anonymous or expired-token request fell through to `clerkClient.users.getUser(undefined)`,
+    // which throws and was caught below as a 500 "A valid resource ID is required."
+    // Clients read that as a server outage instead of "sign in again".
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" })
+    }
+
     // Fetch full user info from Clerk directly
     const clerkUser = await clerkClient.users.getUser(userId)
     let user = await User.findOne({ clerkId: userId })
