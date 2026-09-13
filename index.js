@@ -49,8 +49,10 @@ connectDB();
 app.use(helmet());
 app.use(cors());
 app.use(clerkMiddleware());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Only applies to JSON and form bodies - a multipart upload is parsed by multer, not here,
+// so this is not what caps file uploads (see middleware/uploadMiddleware.js for that).
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(compression());
 
 // Interactive OpenAPI reference for frontend and API consumers.
