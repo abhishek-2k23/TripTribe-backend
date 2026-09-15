@@ -22,7 +22,13 @@ import expense from './routes/expense.routes.js';
 import checklistRouter from './routes/checklist.router.js';
 import fileRouter from './routes/uploadRoutes.js';
 import messageRouter from './routes/message.router.js';
+import aiRouter from './routes/ai.routes.js';
+import creditsRouter from './routes/credits.routes.js';
 import scalarDocsRouter from './docs/scalar.js';
+import { serve as serveInngest } from 'inngest/express';
+import { inngest } from './lib/inngest.js';
+import { inngestFunctions } from './lib/ai/functions.js';
+import { recoverStaleJobs } from './lib/ai/jobs.js';
 
 dotenv.config();
 
@@ -57,6 +63,11 @@ app.use(compression());
 
 // Interactive OpenAPI reference for frontend and API consumers.
 app.use('/api-docs', scalarDocsRouter);
+
+// Inngest calls back into this endpoint to run AI job steps. It is mounted before the /api rate
+// limiter — Inngest's own requests would otherwise spend one IP's request budget — and it
+// authenticates with Inngest's signing key, not Clerk.
+app.use('/api/inngest', serveInngest({ client: inngest, functions: inngestFunctions }));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -103,6 +114,8 @@ app.use("/api/expenses", expense);
 app.use("/api/checklist", checklistRouter);
 app.use("/api/files", fileRouter);
 app.use("/api/discussion", messageRouter)
+app.use("/api/ai", aiRouter);
+app.use("/api/credits", creditsRouter);
 
 app.get('/', (req, res) => {
   res.json({
@@ -119,6 +132,7 @@ app.use(errorHandler);
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+  recoverStaleJobs().catch((error) => console.error('AI job recovery failed:', error));
 });
 
 export default app;
