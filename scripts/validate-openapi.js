@@ -6,9 +6,13 @@ import expenseRoutes from "../routes/expense.routes.js";
 import checklistRoutes from "../routes/checklist.router.js";
 import fileRoutes from "../routes/uploadRoutes.js";
 import discussionRoutes from "../routes/message.router.js";
+import aiRoutes from "../routes/ai.routes.js";
+import creditsRoutes from "../routes/credits.routes.js";
 import openApiDocument from "../docs/openapi.js";
 
 const routeGroups = [
+  ["/ai", aiRoutes],
+  ["/credits", creditsRoutes],
   ["/health", healthRoutes],
   ["/users", userRoutes],
   ["/trips", tripRoutes],

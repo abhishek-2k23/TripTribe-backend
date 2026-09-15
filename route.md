@@ -1054,6 +1054,79 @@ Creates a message and emits `new_discussion_message` to the trip's Socket.IO roo
 
 Current access-control note: authentication is required, but trip membership is not checked.
 
+## AI routes
+
+Every action that calls Claude runs as a background job. The route validates the request, holds the job's credits, and answers `202` with a `jobId`. Poll `GET /ai/jobs/:jobId` until `status` is `succeeded`, `failed` or `cancelled`; `steps[]` drives a progress UI. A failed or cancelled job refunds its credits, and `error.message` is safe to show.
+
+Credit costs: chat `1`, receipt `1`, packing list `2`, trip plan `20` for up to 5 days plus `4` per extra day (trips of up to 14 days). Every user gets 50 free credits a month; unused free credits don't roll over.
+
+Errors specific to AI routes:
+
+| Status | `code` | Meaning |
+| --- | --- | --- |
+| `402` | `INSUFFICIENT_CREDITS` | Not enough credits; body includes `needed` and `available` |
+| `409` | `REPLY_IN_PROGRESS` / `PLAN_IN_PROGRESS` | Wait for the running job |
+| `503` | `AI_NOT_CONFIGURED` / `PLANNER_NOT_CONFIGURED` / `AI_UNAVAILABLE` | Missing server configuration, or the job couldn't start |
+
+### `GET /ai/status`
+
+Which AI features this server has, which job runner it uses (`inngest` or `inline`), and the credit costs.
+
+### `POST /ai/threads` · `GET /ai/threads` · `GET /ai/threads/:threadId/messages`
+
+Conversations with the assistant. A thread can be linked to a trip (`tripId`), which gives the assistant the trip's details; you must be a member. `GET /ai/threads` accepts an optional `?tripId=` filter. The messages response also carries `activeJob` — the reply still being written, or `null` — so a client that left mid-reply can resume polling.
+
+### `POST /ai/chat`
+
+```json
+{ "message": "What should we pack for Coorg in August?", "threadId": "optional", "tripId": "optional" }
+```
+
+- Omit `threadId` to start a new conversation (optionally about `tripId`).
+- `202`: `{ jobId, threadId, messageId, cost }`. The job's `result` is `{ threadId, messageId, reply, suggestions }`, and the reply is also saved to the thread.
+
+### `POST /ai/packing-list`
+
+`{ "tripId": "…" }` — any member. Result: `{ tripId, categories: [{ name, items: [{ title, reason }] }], weather }`, excluding items already on the checklist. Nothing is added to the checklist; add chosen items with `POST /checklist/addItems/:tripId`.
+
+### `POST /ai/receipt`
+
+`multipart/form-data` with `image` (JPEG, PNG, WebP or GIF, up to 5 MB) and optional `tripId`. Result: `{ tripId, draft }` where `draft` has `title`, `amount`, `currency`, `tripCurrency`, `currencyMismatch`, `category`, `description`, `merchant`, `date`, `unreadable`. No expense is created, and the photo is deleted once read.
+
+### `POST /ai/plan`
+
+`{ "tripId": "…", "request": "Relaxed pace, beaches and seafood" }` — owner or editor. Requires `GOOGLE_MAPS_SERVER_KEY` on the server. The plan is grounded in Google Places: every activity is a real place, checked against opening hours and driving times. Result: `{ tripId, proposalId }`.
+
+### `GET /ai/plans?tripId=`
+
+Any member. `{ activeJob, proposals }`: the plan being built for the trip (the full job for whoever requested it, otherwise just `{ _id, kind, status, mine: false }`), and the 10 newest proposals with `status`, `summary`, `request`, `createdBy`, `createdAt`, `activityCount` and `acceptedCount`.
+
+### `GET /ai/jobs/:jobId` · `POST /ai/jobs/:jobId/cancel`
+
+Job progress and result for jobs you started. Cancelling stops the job at its next step and refunds its credits.
+
+### `GET /ai/proposals/:proposalId`
+
+A drafted plan for review — any trip member. `days[].activities[]` carry `_id`, `placeId`, `time`, `durationMin`, `estCostPerPerson`, `travelFromPreviousMin` and a `place` snapshot. `warnings[]` lists checks that still failed after repair; `gaps[]` lists what the candidate places couldn't cover; `budgetEstimate` is computed, not model-generated.
+
+### `POST /ai/proposals/:proposalId/accept`
+
+Owner or editor. `{ "activityIds": ["…"] }`, or an empty body to accept everything remaining. Activities are written through the normal add-activity path with `source: "ai"`; accepting twice never duplicates. Emits `activity_added` per affected day. `200`: `{ proposal, added }`.
+
+### `POST /ai/proposals/:proposalId/reject`
+
+Owner or editor. Marks the proposal dismissed.
+
+## Credit routes
+
+### `GET /credits/balance`
+
+`{ free, paid, total, monthlyFreeCredits, freeResetsAt }`. Reading the balance writes this month's free grant if it hasn't been written yet.
+
+### `GET /credits/ledger`
+
+The latest 100 ledger entries, newest first: `{ bucket, delta, reason, job, note, createdAt }`. Reasons are `grant`, `expire`, `hold`, `refund`, `purchase` and `adjustment`.
+
 ## Socket.IO contract
 
 Connect Socket.IO to the same origin as the HTTP API.
@@ -1084,7 +1157,7 @@ Connect Socket.IO to the same origin as the HTTP API.
 
 1. `POST /users/sync` currently returns `500` without a Clerk identity instead of a clean `401`.
 2. `GET /checklist/fetchLists/:tripId` is public, so checklist data can currently be read without authentication.
-3. Several authenticated itinerary, file, discussion, checklist-toggle, expense-settlement, and budget-dashboard routes do not independently verify trip membership.
+3. Several authenticated file, discussion, checklist-toggle, expense-settlement, and budget-dashboard routes do not independently verify trip membership. Itinerary routes now do: routes that name an itinerary day resolve the trip from that day, and non-members get `403`.
 4. `PUT /trips/:tripId` should receive a complete edit form, especially `coverImage`, `startDate`, and `endDate`.
 5. Expense creation uses the path `tripId` for role authorization but body `selectedTripId` for creation. Clients must send the same ID in both locations.
 6. `GET /expenses/trip/:tripId/debts` is deprecated; use `GET /expenses/debts/:tripId`.

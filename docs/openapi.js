@@ -61,6 +61,40 @@ const roleErrors = {
   403: { $ref: "#/components/responses/Forbidden" },
 };
 
+const threadIdParameter = {
+  name: "threadId",
+  in: "path",
+  required: true,
+  description: "MongoDB ID of the AI conversation.",
+  schema: schemaRef("MongoId"),
+};
+
+const jobIdParameter = {
+  name: "jobId",
+  in: "path",
+  required: true,
+  description: "MongoDB ID of the AI job.",
+  schema: schemaRef("MongoId"),
+};
+
+const proposalIdParameter = {
+  name: "proposalId",
+  in: "path",
+  required: true,
+  description: "MongoDB ID of the itinerary proposal.",
+  schema: schemaRef("MongoId"),
+};
+
+const insufficientCredits = jsonResponse(
+  "Not enough credits. The body carries `code: INSUFFICIENT_CREDITS`, `needed` and `available`.",
+  schemaRef("Error"),
+);
+
+const aiUnavailable = jsonResponse(
+  "AI features, or Google Maps for trip plans, aren't configured on this server, or the AI service couldn't start the job.",
+  schemaRef("Error"),
+);
+
 const openApiDocument = {
   openapi: "3.1.0",
   info: {
@@ -101,6 +135,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
     { name: "Checklist", description: "Trip checklist categories, items, and per-user completion." },
     { name: "Files", description: "Cloudinary upload and trip file metadata." },
     { name: "Discussion", description: "Persisted trip discussion messages." },
+    { name: "AI", description: "Claude-powered chat, packing lists, receipt scanning and trip plans, run as background jobs." },
+    { name: "Credits", description: "AI credit balance and ledger." },
   ],
   security: [{ ClerkBearerAuth: [] }],
   paths: {
@@ -845,6 +881,325 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         },
       },
     },
+    "/ai/status": {
+      get: {
+        tags: ["AI"],
+        operationId: "getAiStatus",
+        summary: "Which AI features are available, and what they cost",
+        responses: {
+          200: jsonResponse("AI availability.", successEnvelope(schemaRef("AiStatus"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/ai/threads": {
+      post: {
+        tags: ["AI"],
+        operationId: "createAiThread",
+        summary: "Start a conversation, optionally about a trip",
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            properties: { tripId: schemaRef("MongoId"), title: { type: "string" } },
+          },
+          { tripId: "64b64c7f0f1e2d3c4b5a6978" },
+        ),
+        responses: {
+          201: jsonResponse("Conversation created.", successEnvelope(schemaRef("AiThread"))),
+          ...roleErrors,
+          503: aiUnavailable,
+        },
+      },
+      get: {
+        tags: ["AI"],
+        operationId: "listAiThreads",
+        summary: "List your conversations, newest first",
+        parameters: [{ name: "tripId", in: "query", required: false, schema: schemaRef("MongoId") }],
+        responses: {
+          200: jsonResponse("Conversations.", successEnvelope({ type: "array", items: schemaRef("AiThread") })),
+          ...standardErrors,
+        },
+      },
+    },
+    "/ai/threads/{threadId}/messages": {
+      get: {
+        tags: ["AI"],
+        operationId: "getAiThreadMessages",
+        summary: "A conversation and its messages",
+        parameters: [threadIdParameter],
+        responses: {
+          200: jsonResponse(
+            "Conversation with messages.",
+            successEnvelope({
+              type: "object",
+              properties: {
+                thread: schemaRef("AiThread"),
+                messages: { type: "array", items: schemaRef("AiMessage") },
+                activeJob: { anyOf: [schemaRef("AiJob"), { type: "null" }], description: "The reply still being written, if any." },
+              },
+            }),
+          ),
+          ...standardErrors,
+        },
+      },
+    },
+    "/ai/chat": {
+      post: {
+        tags: ["AI"],
+        operationId: "sendAiChatMessage",
+        summary: "Ask the assistant a question (1 credit)",
+        description: "Saves the message and starts a chat job. Poll `GET /ai/jobs/{jobId}`; the reply is in `result.reply` and is also saved to the thread. Omit `threadId` to start a new conversation.",
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            required: ["message"],
+            properties: {
+              message: { type: "string", minLength: 1, maxLength: 4000 },
+              threadId: schemaRef("MongoId"),
+              tripId: schemaRef("MongoId"),
+            },
+          },
+          { message: "What should we pack for a monsoon trip to Coorg?", tripId: "64b64c7f0f1e2d3c4b5a6978" },
+        ),
+        responses: {
+          202: jsonResponse(
+            "Job started.",
+            successEnvelope({
+              type: "object",
+              properties: {
+                jobId: schemaRef("MongoId"),
+                threadId: schemaRef("MongoId"),
+                messageId: schemaRef("MongoId"),
+                cost: { type: "integer" },
+              },
+            }),
+          ),
+          ...roleErrors,
+          402: insufficientCredits,
+          409: jsonResponse("A reply is still being written for this conversation.", schemaRef("Error")),
+          503: aiUnavailable,
+        },
+      },
+    },
+    "/ai/packing-list": {
+      post: {
+        tags: ["AI"],
+        operationId: "requestAiPackingList",
+        summary: "Suggest packing items for a trip (2 credits)",
+        description: "Result: `result.categories[]` of `{ name, items: [{ title, reason }] }`, excluding items already on the checklist. Nothing is added to the checklist automatically.",
+        requestBody: jsonRequest(
+          { type: "object", required: ["tripId"], properties: { tripId: schemaRef("MongoId") } },
+          { tripId: "64b64c7f0f1e2d3c4b5a6978" },
+        ),
+        responses: {
+          202: jsonResponse("Job started.", successEnvelope(schemaRef("AiJobStarted"))),
+          ...roleErrors,
+          402: insufficientCredits,
+          503: aiUnavailable,
+        },
+      },
+    },
+    "/ai/receipt": {
+      post: {
+        tags: ["AI"],
+        operationId: "requestAiReceiptScan",
+        summary: "Read a receipt photo into a draft expense (1 credit)",
+        description: "Result: `result.draft` with title, amount, currency, category and description for the Add Expense form. No expense is created, and the photo is deleted once read.",
+        requestBody: {
+          required: true,
+          content: {
+            "multipart/form-data": {
+              schema: {
+                type: "object",
+                required: ["image"],
+                properties: {
+                  image: { type: "string", format: "binary", description: "JPEG, PNG, WebP or GIF, up to 5 MB." },
+                  tripId: schemaRef("MongoId"),
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          202: jsonResponse("Job started.", successEnvelope(schemaRef("AiJobStarted"))),
+          ...roleErrors,
+          402: insufficientCredits,
+          413: jsonResponse("The photo is larger than 5 MB.", schemaRef("Error")),
+          503: aiUnavailable,
+        },
+      },
+    },
+    "/ai/plan": {
+      post: {
+        tags: ["AI"],
+        operationId: "requestAiTripPlan",
+        summary: "Draft a day-by-day plan for a trip (owner or editor)",
+        description: "Costs 20 credits for up to 5 days, plus 4 per extra day; trips of up to 14 days. Requires Google Maps on the server. Result: `result.proposalId` — review it with `GET /ai/proposals/{proposalId}`.",
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            required: ["tripId"],
+            properties: {
+              tripId: schemaRef("MongoId"),
+              request: { type: "string", maxLength: 2000 },
+            },
+          },
+          { tripId: "64b64c7f0f1e2d3c4b5a6978", request: "Relaxed pace, lots of beaches and seafood, one day for Old Goa churches." },
+        ),
+        responses: {
+          202: jsonResponse("Job started.", successEnvelope(schemaRef("AiJobStarted"))),
+          ...roleErrors,
+          402: insufficientCredits,
+          409: jsonResponse("A plan for this trip is already being built.", schemaRef("Error")),
+          503: aiUnavailable,
+        },
+      },
+    },
+    "/ai/plans": {
+      get: {
+        tags: ["AI"],
+        operationId: "listTripPlans",
+        summary: "A trip's recent AI plans and the plan being built, if any (any member)",
+        description: "`activeJob` is the full job for the member who requested it; other members get only `{ _id, kind, status, mine: false }`.",
+        parameters: [{ name: "tripId", in: "query", required: true, schema: schemaRef("MongoId") }],
+        responses: {
+          200: jsonResponse(
+            "Plans.",
+            successEnvelope({
+              type: "object",
+              properties: {
+                activeJob: { type: ["object", "null"], additionalProperties: true },
+                proposals: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      _id: schemaRef("MongoId"),
+                      status: { type: "string", enum: ["pending", "partially_accepted", "accepted", "rejected"] },
+                      summary: { type: "string" },
+                      request: { type: "string" },
+                      createdBy: schemaRef("MongoId"),
+                      createdAt: { type: "string", format: "date-time" },
+                      activityCount: { type: "integer" },
+                      acceptedCount: { type: "integer" },
+                    },
+                  },
+                },
+              },
+            }),
+          ),
+          ...roleErrors,
+        },
+      },
+    },
+    "/ai/jobs/{jobId}": {
+      get: {
+        tags: ["AI"],
+        operationId: "getAiJob",
+        summary: "Job progress and result",
+        parameters: [jobIdParameter],
+        responses: {
+          200: jsonResponse("Job.", successEnvelope(schemaRef("AiJob"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/ai/jobs/{jobId}/cancel": {
+      post: {
+        tags: ["AI"],
+        operationId: "cancelAiJob",
+        summary: "Cancel a running job",
+        description: "The job stops at its next step and its credits are refunded.",
+        parameters: [jobIdParameter],
+        responses: {
+          202: jsonResponse("Cancellation requested.", successEnvelope(schemaRef("AiJob"))),
+          ...standardErrors,
+          409: jsonResponse("The job has already finished.", schemaRef("Error")),
+        },
+      },
+    },
+    "/ai/proposals/{proposalId}": {
+      get: {
+        tags: ["AI"],
+        operationId: "getItineraryProposal",
+        summary: "An AI-drafted plan for review",
+        parameters: [proposalIdParameter],
+        responses: {
+          200: jsonResponse("Proposal.", successEnvelope(schemaRef("ItineraryProposal"))),
+          ...roleErrors,
+        },
+      },
+    },
+    "/ai/proposals/{proposalId}/accept": {
+      post: {
+        tags: ["AI"],
+        operationId: "acceptItineraryProposal",
+        summary: "Add proposed activities to the itinerary (owner or editor)",
+        description: "Omit `activityIds` to accept every remaining activity. Accepting is idempotent: an activity already added isn't added again. Emits `activity_added` per affected day.",
+        parameters: [proposalIdParameter],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { activityIds: { type: "array", items: schemaRef("MongoId") } },
+              },
+            },
+          },
+        },
+        responses: {
+          200: jsonResponse(
+            "Activities added.",
+            successEnvelope({
+              type: "object",
+              properties: { proposal: schemaRef("ItineraryProposal"), added: { type: "integer" } },
+            }),
+          ),
+          ...roleErrors,
+          409: jsonResponse("The proposal was dismissed.", schemaRef("Error")),
+        },
+      },
+    },
+    "/ai/proposals/{proposalId}/reject": {
+      post: {
+        tags: ["AI"],
+        operationId: "rejectItineraryProposal",
+        summary: "Dismiss a proposal (owner or editor)",
+        parameters: [proposalIdParameter],
+        responses: {
+          200: jsonResponse("Proposal dismissed.", successEnvelope(schemaRef("ItineraryProposal"))),
+          ...roleErrors,
+          409: jsonResponse("The proposal is already fully on the itinerary.", schemaRef("Error")),
+        },
+      },
+    },
+    "/credits/balance": {
+      get: {
+        tags: ["Credits"],
+        operationId: "getCreditBalance",
+        summary: "Your AI credit balance",
+        description: "Free credits are granted each month and don't roll over. Reading the balance writes this month's grant if needed.",
+        responses: {
+          200: jsonResponse("Balance.", successEnvelope(schemaRef("CreditBalance"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/credits/ledger": {
+      get: {
+        tags: ["Credits"],
+        operationId: "getCreditLedger",
+        summary: "Your latest 100 credit ledger entries, newest first",
+        responses: {
+          200: jsonResponse(
+            "Ledger entries.",
+            successEnvelope({ type: "array", items: schemaRef("CreditLedgerEntry") }),
+          ),
+          ...standardErrors,
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -863,6 +1218,180 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
       ServerError: jsonResponse("Unexpected server error.", schemaRef("Error")),
     },
     schemas: {
+      AiStatus: {
+        type: "object",
+        properties: {
+          ai: { type: "boolean" },
+          planner: {
+            type: "object",
+            properties: {
+              available: { type: "boolean" },
+              reason: { type: ["string", "null"] },
+            },
+          },
+          jobRunner: { type: "string", enum: ["inngest", "inline"] },
+          costs: { type: "object", additionalProperties: true },
+        },
+      },
+      AiThread: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          user: schemaRef("MongoId"),
+          trip: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          title: { type: "string" },
+          lastMessageAt: { type: "string", format: "date-time" },
+          createdAt: { type: "string", format: "date-time" },
+          updatedAt: { type: "string", format: "date-time" },
+        },
+      },
+      AiMessage: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          thread: schemaRef("MongoId"),
+          user: schemaRef("MongoId"),
+          role: { type: "string", enum: ["user", "assistant"] },
+          content: { type: "string" },
+          suggestions: { type: "array", items: { type: "string" } },
+          job: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      AiJobStarted: {
+        type: "object",
+        properties: {
+          jobId: schemaRef("MongoId"),
+          cost: { type: "integer", description: "Credits held for this job; refunded if it fails." },
+        },
+      },
+      AiJob: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          kind: { type: "string", enum: ["chat", "packing", "receipt", "plan"] },
+          status: { type: "string", enum: ["queued", "running", "succeeded", "failed", "cancelled"] },
+          cost: { type: "integer" },
+          trip: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          thread: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          proposal: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          steps: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                key: { type: "string" },
+                label: { type: "string" },
+                status: { type: "string", enum: ["pending", "running", "done", "skipped", "failed"] },
+                startedAt: { type: "string", format: "date-time" },
+                finishedAt: { type: "string", format: "date-time" },
+              },
+            },
+          },
+          result: {
+            type: ["object", "null"],
+            additionalProperties: true,
+            description:
+              "Set when succeeded. chat: `{ threadId, messageId, reply, suggestions }`; packing: `{ tripId, categories, weather }`; receipt: `{ tripId, draft }`; plan: `{ tripId, proposalId }`.",
+          },
+          error: {
+            type: ["object", "null"],
+            properties: { code: { type: "string" }, message: { type: "string" } },
+          },
+          cancelRequested: { type: "boolean" },
+          createdAt: { type: "string", format: "date-time" },
+          startedAt: { type: ["string", "null"], format: "date-time" },
+          finishedAt: { type: ["string", "null"], format: "date-time" },
+        },
+      },
+      ItineraryProposal: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          trip: schemaRef("MongoId"),
+          job: schemaRef("MongoId"),
+          createdBy: schemaRef("MongoId"),
+          request: { type: "string" },
+          summary: { type: "string" },
+          pace: { type: "string", enum: ["relaxed", "balanced", "packed"] },
+          days: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                date: { type: "string", format: "date" },
+                title: { type: "string" },
+                activities: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      _id: schemaRef("MongoId"),
+                      placeId: { type: "string" },
+                      title: { type: "string" },
+                      section: { type: "string" },
+                      time: { type: ["string", "null"], description: "24-hour HH:MM" },
+                      type: schemaRef("ActivityType"),
+                      estCostPerPerson: { type: "number" },
+                      durationMin: { type: "integer" },
+                      notes: { type: "string" },
+                      travelFromPreviousMin: { type: ["integer", "null"] },
+                      place: {
+                        type: "object",
+                        properties: {
+                          placeId: { type: "string" },
+                          name: { type: "string" },
+                          address: { type: "string" },
+                          lat: { type: "number" },
+                          lng: { type: "number" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          gaps: { type: "array", items: { type: "string" } },
+          warnings: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                date: { type: "string", format: "date" },
+                messages: { type: "array", items: { type: "string" } },
+              },
+            },
+          },
+          weather: { type: "array", items: { type: "object", additionalProperties: true } },
+          budgetEstimate: { type: ["object", "null"], additionalProperties: true },
+          status: { type: "string", enum: ["pending", "partially_accepted", "accepted", "rejected"] },
+          acceptedActivityIds: { type: "array", items: schemaRef("MongoId") },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
+      CreditBalance: {
+        type: "object",
+        properties: {
+          free: { type: "integer" },
+          paid: { type: "integer" },
+          total: { type: "integer" },
+          monthlyFreeCredits: { type: "integer" },
+          freeResetsAt: { type: "string", format: "date-time" },
+        },
+      },
+      CreditLedgerEntry: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          bucket: { type: "string", enum: ["free", "paid"] },
+          delta: { type: "number" },
+          reason: { type: "string", enum: ["grant", "expire", "hold", "refund", "purchase", "adjustment"] },
+          job: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
+          note: { type: "string" },
+          createdAt: { type: "string", format: "date-time" },
+        },
+      },
       MongoId: {
         type: "string",
         pattern: "^[a-fA-F0-9]{24}$",
