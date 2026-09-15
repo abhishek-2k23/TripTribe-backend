@@ -1,46 +1,31 @@
 import Itinerary from "../models/Itinerary.model.js";
+import { addActivityToDay, pickActivityFields } from "../lib/itinerary.js";
+
+// Membership is checked by requireTripMember before this runs, so req.trip is the verified trip.
 export const addActivity = async (req, res, next) => {
   try {
-    const { tripId, section, date, title, time, location, type, notes, attachment } = req.body;
-    const newActivity = { title, time, location, type, notes, attachment };
-
-    // 1. Try to find the day first
-    let dayPlan = await Itinerary.findOne({ 
-        trip: tripId, 
-        date: new Date(date) 
-    });
-
-    if (!dayPlan) {
-      // CASE 1: Completely new day. Create Day -> Section -> Activity.
-      dayPlan = await Itinerary.create({
-        trip: tripId,
-        date: new Date(date),
-        sections: [{ section, activities: [newActivity] }]
-      });
-    } else {
-      // CASE 2: Day exists. Check if the Section (e.g., "Golden Pavilion Visit") exists.
-      const existingSection = dayPlan.sections.find(s => s.section === section);
-
-      if (existingSection) {
-        // Sub-case A: Section exists, just push the new activity into it.
-        existingSection.activities.push(newActivity);
-      } else {
-        // Sub-case B: It's a new section for an existing day.
-        dayPlan.sections.push({ section, activities: [newActivity] });
-      }
-      
-      await dayPlan.save();
+    const { section, date, title } = req.body;
+    if (!section || !date || !title) {
+      return res.status(400).json({ success: false, message: "section, date and title are required" });
     }
 
-    const io = req.app.get("socketio");
-      const roomName = tripId.toString(); 
+    const tripId = req.trip._id;
+    const { dayPlan, created } = await addActivityToDay({
+      tripId,
+      date,
+      section,
+      activity: pickActivityFields(req.body),
+    });
 
-      console.log(`Emitting activity_added to room: ${roomName}`);
-      io.to(tripId).emit("activity_added", dayPlan);
+    // A repeat of an already-created activity (same clientRef) changes nothing, so nothing is emitted.
+    if (created) {
+      const io = req.app.get("socketio");
+      io?.to(tripId.toString()).emit("activity_added", dayPlan);
+    }
 
-    res.status(201).json({
+    res.status(created ? 201 : 200).json({
       success: true,
-      message: "Activity added successfully",
+      message: created ? "Activity added successfully" : "Activity was already added",
       data: dayPlan
     });
   } catch (error) {
@@ -50,7 +35,8 @@ export const addActivity = async (req, res, next) => {
 
 export const toggleActivityStatus = async (req, res, next) => {
   try {
-    const { itineraryId, activityId, isDone, tripId } = req.body;
+    const { itineraryId, activityId, isDone } = req.body;
+    const tripId = req.trip._id.toString();
 
     const updated = await Itinerary.findOneAndUpdate(
       { _id: itineraryId, "sections.activities._id": activityId },
@@ -96,7 +82,9 @@ export const addActivityComment = async (req, res, next) => {
 
 export const deleteActivity = async (req, res, next) => {
   try {
-    const { itineraryId, activityId, tripId } = req.params; // Ensure tripId is passed or fetched
+    const { itineraryId, activityId } = req.params;
+    // The trip comes from the itinerary day (requireTripMember), not the URL's tripId segment.
+    const tripId = req.trip._id.toString();
 
     const result = await Itinerary.findOneAndUpdate(
       { _id: itineraryId },
