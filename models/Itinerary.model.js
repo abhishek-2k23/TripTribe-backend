@@ -13,6 +13,19 @@ const activitySchema = new mongoose.Schema({
   notes: String, // Matches your "This is new activity" field
   attachment: { type: String, default: null },
   isDone: { type: Boolean, default: false },
+  // Structured place, when the activity came from a place search or an AI plan (ai-plan §3.2).
+  place: {
+    type: new mongoose.Schema(
+      { placeId: String, name: String, address: String, lat: Number, lng: Number },
+      { _id: false }
+    ),
+    default: undefined,
+  },
+  estCost: Number, // per person, trip currency
+  durationMin: Number,
+  source: { type: String, enum: ["manual", "ai"], default: "manual" },
+  // Idempotency key from the creating client or AI accept; a repeat create returns the original.
+  clientRef: { type: String, default: undefined },
   // Internal discussion/comments array
   comments: [{
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -30,5 +43,10 @@ const itinerarySchema = new mongoose.Schema({
     activities: [activitySchema]
   }]
 }, { timestamps: true });
+
+// Day lookups match a date window (see lib/itinerary.js), so this index serves them. It is not
+// unique yet: existing data may already hold forked days, which need a dedupe before that.
+itinerarySchema.index({ trip: 1, date: 1 });
+itinerarySchema.index({ "sections.activities.clientRef": 1 }, { sparse: true });
 
 export default mongoose.model("Itinerary", itinerarySchema);

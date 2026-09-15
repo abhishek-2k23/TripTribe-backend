@@ -73,6 +73,26 @@ const tripSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+    // Structured destination beside the free-text `location`, resolved on first AI plan (ai-plan §3.1).
+    place: {
+      type: new mongoose.Schema(
+        {
+          placeId: String,
+          name: String,
+          address: String,
+          lat: Number,
+          lng: Number,
+          types: [String],
+        },
+        { _id: false }
+      ),
+      default: undefined,
+    },
+    theme: {
+      type: String,
+      enum: ["monsoon", "mountain", "coast", "desert", "heritage", "wild", "city"],
+      default: undefined,
+    },
   },
   { timestamps: true },
 )
