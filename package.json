@@ -20,6 +20,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
     "@clerk/express": "^1.7.76",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.3",
@@ -30,6 +31,7 @@
     "express-rate-limit": "^7.1.5",
     "express-validator": "^7.0.1",
     "helmet": "^7.1.0",
+    "inngest": "^4.20.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.3",
     "morgan": "^1.10.0",
