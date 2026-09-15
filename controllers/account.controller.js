@@ -16,6 +16,13 @@ import Expense from "../models/expense.model.js";
 import Checklist from "../models/checklist.model.js";
 import File from "../models/file.model.js";
 import Message from "../models/message.model.js";
+import AiThread from "../models/aiThread.model.js";
+import AiMessage from "../models/aiMessage.model.js";
+import AiJob from "../models/aiJob.model.js";
+import AiUpload from "../models/aiUpload.model.js";
+import ItineraryProposal from "../models/itineraryProposal.model.js";
+import CreditLedger from "../models/creditLedger.model.js";
+import CreditAccount from "../models/creditAccount.model.js";
 
 const DELETED_NAME = "Deleted user";
 
@@ -66,6 +73,7 @@ export const deleteMyAccount = async (req, res, next) => {
     filesDeleted: 0,
     expensesKept: 0,
     assetsDestroyed: 0,
+    aiConversationsDeleted: 0,
     signInAccountDeleted: false,
   };
 
@@ -109,6 +117,7 @@ export const deleteMyAccount = async (req, res, next) => {
         Checklist.deleteMany({ tripId: { $in: deletedTripIds.map(String) } }),
         File.deleteMany({ tripId: { $in: deletedTripIds } }),
         Message.deleteMany({ trip: { $in: deletedTripIds } }),
+        ItineraryProposal.deleteMany({ trip: { $in: deletedTripIds } }),
         Trip.deleteMany({ _id: { $in: deletedTripIds } }),
       ]);
     }
@@ -119,6 +128,18 @@ export const deleteMyAccount = async (req, res, next) => {
     summary.filesDeleted = (await File.deleteMany({ uploadedBy: userId })).deletedCount;
 
     summary.messagesDeleted = (await Message.deleteMany({ sender: userId })).deletedCount;
+
+    // AI conversations, jobs, pending receipt photos and credits. Credits are forfeited.
+    const aiThreadIds = (await AiThread.find({ user: userId }).select("_id").lean()).map((t) => t._id);
+    await Promise.all([
+      AiMessage.deleteMany({ $or: [{ thread: { $in: aiThreadIds } }, { user: userId }] }),
+      AiThread.deleteMany({ user: userId }),
+      AiUpload.deleteMany({ user: userId }),
+      AiJob.deleteMany({ user: userId }),
+      CreditLedger.deleteMany({ user: userId }),
+      CreditAccount.deleteOne({ _id: userId }),
+    ]);
+    summary.aiConversationsDeleted = aiThreadIds.length;
 
     await Itinerary.updateMany(
       { "sections.activities.comments.user": userId },
@@ -181,7 +202,7 @@ export const exportMyData = async (req, res, next) => {
     const userId = user._id;
     const userIdString = userId.toString();
 
-    const [trips, messages, expenses, files, itineraries, checklists] = await Promise.all([
+    const [trips, messages, expenses, files, itineraries, checklists, aiThreads, aiMessages, creditLedger] = await Promise.all([
       Trip.find({ "members.user": userId })
         .select("name location description startDate endDate members createdAt")
         .lean(),
@@ -194,6 +215,9 @@ export const exportMyData = async (req, res, next) => {
       File.find({ uploadedBy: userId }).select("tripId name category notes url fileType size createdAt").lean(),
       Itinerary.find({ "sections.activities.comments.user": userId }).select("trip date sections").lean(),
       Checklist.find({ "categories.items.completedBy": userId }).select("tripId categories").lean(),
+      AiThread.find({ user: userId }).select("trip title createdAt").lean(),
+      AiMessage.find({ user: userId }).select("thread role content createdAt").sort({ createdAt: 1 }).lean(),
+      CreditLedger.find({ user: userId }).select("bucket delta reason note createdAt").sort({ createdAt: 1 }).lean(),
     ]);
 
     // Only this user's own data: roles instead of full rosters, own shares instead of everyone's.
@@ -252,6 +276,11 @@ export const exportMyData = async (req, res, next) => {
             expense.splitDetails.find((s) => s.user.toString() === userIdString) ?? null,
         })),
         files,
+        aiConversations: aiThreads.map((thread) => ({
+          ...thread,
+          messages: aiMessages.filter((m) => m.thread.toString() === thread._id.toString()),
+        })),
+        credits: creditLedger,
       },
     });
   } catch (error) {
