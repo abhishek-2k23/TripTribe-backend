@@ -17,6 +17,7 @@ import { aiConfigured, CREDIT_COST, PLAN, planCredits, plannerConfigured } from 
 import { createJob } from "../lib/ai/jobs.js";
 import { jobRunnerMode } from "../lib/inngest.js";
 import { addActivityToDay, tripDayIds } from "../lib/itinerary.js";
+import { bumpRevisionFor } from "../lib/revisions.js";
 
 const EDIT_ROLES = ["owner", "editor"];
 const MAX_MESSAGE_LENGTH = 4000;
@@ -442,6 +443,8 @@ export const acceptProposal = async (req, res, next) => {
       const total = proposal.days.reduce((count, day) => count + day.activities.length, 0);
       proposal.status = proposal.acceptedActivityIds.length >= total ? "accepted" : "partially_accepted";
       await proposal.save();
+
+      await bumpRevisionFor(req, proposal.trip, "itinerary");
 
       const io = req.app.get("socketio");
       for (const dayPlan of touchedDays.values()) {

@@ -1,24 +1,32 @@
 // controllers/discussion.controller.js
 import Message from "../models/message.model.js";
+import { createIdempotent, readClientRef } from "../lib/idempotency.js";
+import { bumpRevisionFor } from "../lib/revisions.js";
 
+// requireTripMember has already resolved and verified the trip, so `req.trip` is authoritative and
+// the body's own tripId is not consulted again.
 export const sendMessage = async (req, res, next) => {
   try {
-    const { tripId, text } = req.body;
+    const { text } = req.body;
+    const tripId = req.trip._id;
     const senderId = req.user._id;
 
-    const newMessage = await Message.create({
-      trip: tripId,
-      sender: senderId,
-      text
+    const { document: message, created } = await createIdempotent(Message, {
+      scope: { trip: tripId },
+      clientRef: readClientRef(req.body),
+      data: { trip: tripId, sender: senderId, text },
     });
 
-    const populatedMessage = await newMessage.populate("sender", "name imageUrl");
+    const populatedMessage = await message.populate("sender", "name imageUrl");
 
-    // Real-time Emission
-    const io = req.app.get("socketio");
-    io.to(tripId).emit("new_discussion_message", populatedMessage);
+    // A replayed send changes nothing, so nobody is told about it a second time.
+    if (created) {
+      const io = req.app.get("socketio");
+      io?.to(tripId.toString()).emit("new_discussion_message", populatedMessage);
+      await bumpRevisionFor(req, tripId, "discussion");
+    }
 
-    res.status(201).json({ success: true, data: populatedMessage });
+    res.status(created ? 201 : 200).json({ success: true, data: populatedMessage });
   } catch (error) {
     next(error);
   }
@@ -26,7 +34,7 @@ export const sendMessage = async (req, res, next) => {
 
 export const getTripMessages = async (req, res, next) => {
   try {
-    const { tripId } = req.params;
+    const tripId = req.trip._id;
     const messages = await Message.find({ trip: tripId })
       .sort({ createdAt: 1 }) // Chronological order
       .populate("sender", "name imageUrl");

@@ -1,4 +1,5 @@
 import Trip from "../models/trip.model.js";
+import { bumpRevisionFor } from "../lib/revisions.js";
 
 export const createTrip = async (req, res, next) => {
   try {
@@ -117,6 +118,7 @@ export const joinTrip = async (req, res, next) => {
     const io = req.app.get("socketio");
 
     io.to(trip._id.toString()).emit("member_joined", {populatedTrip, name: req.user.name});
+    await bumpRevisionFor(req, trip._id, "members");
 
     return res.json({
       success: true,
@@ -127,45 +129,58 @@ export const joinTrip = async (req, res, next) => {
   }
 };
 
-export const updateTrip = async (req, res) => {
+/**
+ * A partial update: only the fields actually present in the body are written (ai-plan §5.4).
+ *
+ * It used to be a full replace, which had two failure modes. `coverImage.url` threw whenever the
+ * body omitted the image, so a rename request 500'd. And the AI flow writes `place` and `theme`
+ * without re-sending the members array — under a full replace, a background job racing someone's
+ * role change silently reverted it.
+ */
+export const updateTrip = async (req, res, next) => {
   try {
-    const { tripId } = req.params;
-    const { tripName, startDate, endDate, members, coverImage, description } = req.body;
+    // requireTripMember has already loaded and authorised the trip.
+    const trip = req.trip;
+    const { tripName, name, startDate, endDate, members, coverImage, description, place, theme } = req.body ?? {};
 
-    console.log(tripId, req.body);
-    // 1. Validate if trip exists
-    const trip = await Trip.findById(tripId);
-    if (!trip) {
-      return res.status(404).json({ success: false, message: "Trip not found" });
+    const update = {};
+    const nextName = tripName ?? name;
+    if (nextName !== undefined) update.name = nextName;
+    if (description !== undefined) update.description = description;
+    if (startDate !== undefined) update.startDate = new Date(startDate);
+    if (endDate !== undefined) update.endDate = new Date(endDate);
+    if (place !== undefined) update.place = place;
+    if (theme !== undefined) update.theme = theme;
+
+    // Only touch the members array when the caller actually sent one.
+    if (Array.isArray(members) && members.length > 0) {
+      update.members = members.map((m) => ({ user: m._id ?? m.user, role: m.role }));
     }
 
-    let formattedMembers;
-    if(members && members.length > 0){
+    if (coverImage?.url !== undefined) update["image.url"] = coverImage.url;
+    if (coverImage?.public_id !== undefined) update["image.public_id"] = coverImage.public_id;
 
-      formattedMembers = members.map((m) => ({
-      user: m._id,
-      role: m.role,
-    }));
+    const start = update.startDate ?? trip.startDate;
+    const end = update.endDate ?? trip.endDate;
+    if (start && end && new Date(end) < new Date(start)) {
+      return res.status(400).json({ success: false, message: "End date cannot be before start date" });
     }
 
-    // 3. Update the trip
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ success: false, message: "Nothing to update" });
+    }
+
     const updatedTrip = await Trip.findByIdAndUpdate(
-      tripId,
+      trip._id,
+      { $set: update },
       {
-        $set: {
-          name: tripName || trip.name,
-          description: description || trip.description,
-          startDate: new Date(startDate) || trip.startDate,
-          endDate: new Date(endDate) || trip.endDate,
-          members: formattedMembers || trip.members,
-          "image.url": coverImage.url, 
-        },
-      },
-      { 
         new: true,
-        runValidators: true 
+        runValidators: true
       }
     ).populate("members.user", "name email imageUrl");
+
+    await bumpRevisionFor(req, trip._id, "trip");
+    if (update.members) await bumpRevisionFor(req, trip._id, "members");
 
     res.status(200).json({
       success: true,
@@ -173,11 +188,7 @@ export const updateTrip = async (req, res) => {
       data: updatedTrip,
     });
   } catch (error) {
-    console.error("Update Trip Error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Internal Server Error",
-    });
+    next(error);
   }
 };
 
@@ -203,6 +214,7 @@ export const updateMemberRole = async (req, res, next) => {
     member.role = role;
 
     await trip.save();
+    await bumpRevisionFor(req, trip._id, "members");
 
     return res.json({
       success: true,
@@ -288,6 +300,8 @@ export const updateTripBudget = async (req, res, next) => {
     if (!updatedTrip) {
       return res.status(404).json({ success: false, message: "Trip not found" });
     }
+
+    await bumpRevisionFor(req, updatedTrip._id, "budget");
 
     res.status(200).json({
       success: true,

@@ -1,4 +1,5 @@
 import Checklist from "../models/checklist.model.js"
+import { bumpRevisionFor } from "../lib/revisions.js";
 
 export const bulkAddChecklistItems = async (req, res, next) => {
   try {
@@ -58,6 +59,8 @@ export const bulkAddChecklistItems = async (req, res, next) => {
       io.to(roomName).emit("checklist_updated", checklist.categories);
     }
 
+    await bumpRevisionFor(req, req.trip._id, "checklist");
+
     res.status(200).json({ success: true, data: checklist });
   } catch (error) {
     next(error);
@@ -88,6 +91,11 @@ export const toggleItem = async (req, res, next) => {
     const { isChecked } = req.body;
     const userId = req.user._id;
 
+    // An explicit target state, not a flip (design.md D-022): a replayed toggle must be harmless.
+    if (typeof isChecked !== "boolean") {
+      return res.status(400).json({ success: false, message: "isChecked must be true or false" });
+    }
+
     
     const updateAction = isChecked 
       ? { $addToSet: { "categories.$[cat].items.$[itm].completedBy": userId } }
@@ -113,6 +121,8 @@ export const toggleItem = async (req, res, next) => {
         updatedItem 
       });
     }
+
+    await bumpRevisionFor(req, req.trip._id, "checklist");
 
     res.status(200).json({ success: true, data: updatedItem });
   } catch (error) {
