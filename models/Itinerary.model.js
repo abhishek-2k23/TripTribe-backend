@@ -44,9 +44,13 @@ const itinerarySchema = new mongoose.Schema({
   }]
 }, { timestamps: true });
 
-// Day lookups match a date window (see lib/itinerary.js), so this index serves them. It is not
-// unique yet: existing data may already hold forked days, which need a dedupe before that.
-itinerarySchema.index({ trip: 1, date: 1 });
+// Day lookups match a date window (see lib/itinerary.js), so this index serves them, and it is
+// unique so a trip can only ever hold one document per stored day key (design.md D-013).
+//
+// It only bites once the stored keys are normalized: days written by the web sit at local midnight,
+// so two shapes of the same calendar day are still two different values. scripts/dedupe-itinerary-days.js
+// merges any forks and moves every day onto UTC midnight; run it before trusting this index.
+itinerarySchema.index({ trip: 1, date: 1 }, { unique: true });
 itinerarySchema.index({ "sections.activities.clientRef": 1 }, { sparse: true });
 
 export default mongoose.model("Itinerary", itinerarySchema);
