@@ -23,6 +23,8 @@ import AiUpload from "../models/aiUpload.model.js";
 import ItineraryProposal from "../models/itineraryProposal.model.js";
 import CreditLedger from "../models/creditLedger.model.js";
 import CreditAccount from "../models/creditAccount.model.js";
+import Device from "../models/device.model.js";
+import TripRevision from "../models/tripRevision.model.js";
 
 const DELETED_NAME = "Deleted user";
 
@@ -30,22 +32,38 @@ const DELETED_NAME = "Deleted user";
  * Best-effort Cloudinary cleanup. Uploads use `resource_type: "auto"`, so images and PDFs are
  * stored as "image", videos as "video", and anything else as "raw". A failure is logged and
  * skipped: a leftover asset must not block someone's account deletion.
+ *
+ * Documents are stored as `authenticated` and cover images as `upload`, and destroy will not find
+ * an asset under the wrong delivery type, so both are tried for records written before that
+ * distinction existed (design.md D-012).
  */
 async function destroyAssets(assets) {
   let destroyed = 0;
-  for (const { public_id, fileType } of assets) {
+  for (const { public_id, fileType, resourceType, deliveryType } of assets) {
     if (!public_id) continue;
-    const resourceTypes = fileType?.startsWith("video/") ? ["video"] : ["image", "raw"];
+
+    const resourceTypes = resourceType
+      ? [resourceType]
+      : fileType?.startsWith("video/")
+        ? ["video"]
+        : ["image", "raw"];
+    const deliveryTypes = deliveryType ? [deliveryType] : ["authenticated", "upload"];
+
+    let done = false;
     for (const resource_type of resourceTypes) {
-      try {
-        const result = await cloudinary.uploader.destroy(public_id, { resource_type });
-        if (result?.result === "ok") {
-          destroyed += 1;
-          break;
+      for (const type of deliveryTypes) {
+        try {
+          const result = await cloudinary.uploader.destroy(public_id, { resource_type, type });
+          if (result?.result === "ok") {
+            destroyed += 1;
+            done = true;
+            break;
+          }
+        } catch (error) {
+          console.warn(`Cloudinary destroy failed for ${public_id} (${resource_type}/${type}):`, error?.message);
         }
-      } catch (error) {
-        console.warn(`Cloudinary destroy failed for ${public_id} (${resource_type}):`, error?.message);
       }
+      if (done) break;
     }
   }
   return destroyed;
@@ -107,7 +125,7 @@ export const deleteMyAccount = async (req, res, next) => {
     }
 
     if (deletedTripIds.length > 0) {
-      const tripFiles = await File.find({ tripId: { $in: deletedTripIds } }).select("public_id fileType");
+      const tripFiles = await File.find({ tripId: { $in: deletedTripIds } }).select("public_id fileType resourceType deliveryType");
       summary.assetsDestroyed += await destroyAssets([...tripFiles, ...deletedCovers]);
 
       await Promise.all([
@@ -118,12 +136,13 @@ export const deleteMyAccount = async (req, res, next) => {
         File.deleteMany({ tripId: { $in: deletedTripIds } }),
         Message.deleteMany({ trip: { $in: deletedTripIds } }),
         ItineraryProposal.deleteMany({ trip: { $in: deletedTripIds } }),
+        TripRevision.deleteMany({ trip: { $in: deletedTripIds } }),
         Trip.deleteMany({ _id: { $in: deletedTripIds } }),
       ]);
     }
 
     // 2. The user's own content in trips that continue without them.
-    const ownFiles = await File.find({ uploadedBy: userId }).select("public_id fileType");
+    const ownFiles = await File.find({ uploadedBy: userId }).select("public_id fileType resourceType deliveryType");
     summary.assetsDestroyed += await destroyAssets(ownFiles);
     summary.filesDeleted = (await File.deleteMany({ uploadedBy: userId })).deletedCount;
 
@@ -138,6 +157,8 @@ export const deleteMyAccount = async (req, res, next) => {
       AiJob.deleteMany({ user: userId }),
       CreditLedger.deleteMany({ user: userId }),
       CreditAccount.deleteOne({ _id: userId }),
+      // Push targets, or the phone keeps being woken for trips this account no longer has.
+      Device.deleteMany({ user: userId }),
     ]);
     summary.aiConversationsDeleted = aiThreadIds.length;
 
