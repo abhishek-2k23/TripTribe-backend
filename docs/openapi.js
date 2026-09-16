@@ -53,7 +53,17 @@ const standardErrors = {
   400: { $ref: "#/components/responses/BadRequest" },
   401: { $ref: "#/components/responses/Unauthorized" },
   404: { $ref: "#/components/responses/NotFound" },
+  429: { $ref: "#/components/responses/TooManyRequests" },
   500: { $ref: "#/components/responses/ServerError" },
+};
+
+const clientRefProperty = {
+  clientRef: {
+    type: "string",
+    maxLength: 200,
+    description:
+      "Idempotency key, generated when the user acted rather than when the request was sent. Replaying a create with the same key returns the original document with `200` instead of creating a second one.",
+  },
 };
 
 const roleErrors = {
@@ -122,8 +132,28 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
 
 - Dates are ISO 8601 strings. MongoDB IDs are 24-character hexadecimal strings.
 - File creation is a two-step flow: upload multipart data to \`/files/upload-raw\`, let the user edit metadata, then save it with \`/files/finalize\`.
-- Expense creation currently reads the trip from both the URL and \`selectedTripId\` in the JSON body. Send the same ID in both places.
+- Expense creation reads the trip from the URL only. A \`selectedTripId\` in the body is ignored.
 - Error bodies produced directly by auth middleware can contain only \`message\`; centralized errors use \`success: false\` and \`error\`.
+
+### Membership
+
+Every route that names a trip requires the caller to be a member of it, and the trip is resolved from the URL or, where a request names an itinerary day, from that day. A trip ID in the body is never trusted on its own.
+
+### Rate limits
+
+Authenticated requests are counted per user, not per IP, so people sharing a carrier NAT do not share a budget. Unauthenticated routes are counted per IP. \`GET /sync/{tripId}/rev\` and AI job polling each have their own bucket. Over the limit, the response is \`429\` with \`{ success: false, message, retryAfterSeconds }\` plus \`RateLimit-*\` headers. Every limit is a server environment variable; the development defaults are deliberately loose.
+
+### Idempotent creates
+
+Creating an expense, a message, an activity or a file record accepts a \`clientRef\`. Sending the same key again returns the document that already exists, with \`200\` rather than \`201\`, so a replayed offline write cannot duplicate it.
+
+### Staying in sync
+
+Every write bumps a counter for the section it changed and emits one generic \`trip_changed\` socket event carrying \`{ tripId, section, rev }\`. On reconnect and on foreground, call \`GET /sync/{tripId}/rev\` once and refetch only the sections whose number moved. Do not poll.
+
+### File delivery
+
+Trip documents are stored as authenticated Cloudinary assets and have **no permanent URL**. The \`url\` on a file is a signed link that expires in ten minutes; \`GET /files/{fileId}/url\` mints another. Images the UI renders directly — trip covers, activity photos, profile pictures — must be uploaded with \`?scope=public\` to keep a durable URL.
 `,
   },
   tags: [
@@ -137,6 +167,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
     { name: "Discussion", description: "Persisted trip discussion messages." },
     { name: "AI", description: "Claude-powered chat, packing lists, receipt scanning and trip plans, run as background jobs." },
     { name: "Credits", description: "AI credit balance and ledger." },
+    { name: "Sync", description: "Per-section revision counters for reconnect and foreground catch-up." },
+    { name: "Devices", description: "Expo push token registration." },
   ],
   security: [{ ClerkBearerAuth: [] }],
   paths: {
@@ -451,7 +483,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Itinerary"],
         operationId: "addItineraryActivity",
         summary: "Add an activity",
-        description: "Creates the dated itinerary and/or section when needed. Emits `activity_added`.",
+        description:
+          "Creates the dated itinerary and/or section when needed. Emits `activity_added`. `date` is normalized to the nearest UTC midnight, and an existing day anywhere in the surrounding 24 hours is reused, so the same calendar day never forks. Replaying with a known `clientRef` returns the original day and `200`.",
         requestBody: jsonRequest(
           {
             type: "object",
@@ -466,6 +499,7 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
               type: schemaRef("ActivityType"),
               notes: { type: "string" },
               attachment: { type: ["string", "null"], format: "uri" },
+              ...clientRefProperty,
             },
           },
           {
@@ -481,6 +515,10 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
           },
         ),
         responses: {
+          200: jsonResponse(
+            "The activity already existed for this `clientRef`; nothing was created.",
+            successEnvelope(schemaRef("Itinerary"), { message: { type: "string" } }),
+          ),
           201: jsonResponse(
             "Activity added.",
             successEnvelope(schemaRef("Itinerary"), { message: { type: "string" } }),
@@ -519,7 +557,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Itinerary"],
         operationId: "setActivityStatus",
         summary: "Set an activity's completion status",
-        description: "Emits `activity_updated` to the supplied trip room.",
+        description:
+          "Emits `activity_updated` to the trip room. `isDone` is a target state, not a flip: send `true` or `false` explicitly. A missing or non-boolean value is rejected with `400`, because a flip replayed twice from an offline queue would undo itself.",
         requestBody: jsonRequest(
           {
             type: "object",
@@ -589,14 +628,15 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Expenses"],
         operationId: "addExpense",
         summary: "Add an expense",
-        description: "Requires owner or editor. `selectedTripId` must equal the URL `tripId`. The payer is automatically included in participants. Emits `expense_added`.",
+        description:
+          "Requires owner or editor. The trip comes from the URL; a `selectedTripId` in the body is ignored. The payer is automatically included in participants. Emits `expense_added`.",
         parameters: [tripIdParameter],
         requestBody: jsonRequest(
           {
             type: "object",
-            required: ["selectedTripId", "title", "amount", "category", "splitType"],
+            required: ["title", "amount", "category", "splitType"],
             properties: {
-              selectedTripId: schemaRef("MongoId"),
+              selectedTripId: { ...schemaRef("MongoId"), deprecated: true, description: "Ignored. The URL `tripId` is authoritative." },
               title: { type: "string" },
               description: { type: "string" },
               amount: { type: "number", exclusiveMinimum: 0 },
@@ -604,10 +644,10 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
               splitType: { type: "string", enum: ["equally", "selected", "none"] },
               participants: { type: "array", items: schemaRef("MongoId"), default: [] },
               paidBy: { ...schemaRef("MongoId"), description: "Defaults to the current user." },
+              ...clientRefProperty,
             },
           },
           {
-            selectedTripId: "64b64c7f0f1e2d3c4b5a6978",
             title: "Dinner",
             description: "First-night group dinner",
             amount: 4200,
@@ -618,6 +658,7 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
           },
         ),
         responses: {
+          200: jsonResponse("The expense already existed for this `clientRef`.", successEnvelope(schemaRef("Expense"))),
           201: jsonResponse("Expense added.", successEnvelope(schemaRef("Expense"))),
           ...roleErrors,
         },
@@ -655,6 +696,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Expenses"],
         operationId: "settleDebt",
         summary: "Mark one expense split as settled",
+        description:
+          "Only the person who paid the expense can settle it against a debtor — they are the one who knows the money arrived. Anyone else gets `403`.",
         requestBody: jsonRequest(
           {
             type: "object",
@@ -679,6 +722,7 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
             },
           }),
           ...standardErrors,
+          403: { $ref: "#/components/responses/Forbidden" },
         },
       },
     },
@@ -767,7 +811,17 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Files"],
         operationId: "uploadRawFile",
         summary: "Upload a physical file to Cloudinary",
-        description: "Step 1 of file creation. Send exactly one multipart field named `file`, then pass the returned values into `/files/finalize` after metadata editing.",
+        description:
+          "Step 1 of file creation. Send exactly one multipart field named `file`, then pass the returned values into `/files/finalize` after metadata editing. Without `scope`, the file is stored as an authenticated Cloudinary asset with no durable URL — the safe default for passports, tickets and bookings. Images the UI renders straight from a URL (trip covers, activity photos, profile pictures) must pass `?scope=public`, or the URL written onto the trip will stop working within ten minutes.",
+        parameters: [
+          {
+            name: "scope",
+            in: "query",
+            required: false,
+            description: "`public` for an image rendered directly from its URL. Anything else, including omitting it, stores an authenticated document.",
+            schema: { type: "string", enum: ["public", "document"], default: "document" },
+          },
+        ],
         requestBody: {
           required: true,
           content: {
@@ -791,7 +845,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Files"],
         operationId: "finalizeFile",
         summary: "Save uploaded file metadata",
-        description: "Step 2 of file creation. `url`, `public_id`, and `size` come from the raw upload response; `name`, `category`, and `notes` can be edited by the user.",
+        description:
+          "Step 2 of file creation. `public_id`, `size` and the delivery fields come from the raw upload response; `name`, `category`, and `notes` can be edited by the user. Pass `resourceType`, `deliveryType` and `format` straight through so the file can be signed later. For an authenticated document the `url` is not stored — read the file back through its signed URL.",
         requestBody: jsonRequest(
           {
             type: "object",
@@ -803,8 +858,12 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
               notes: { type: "string" },
               url: { type: "string", format: "uri" },
               public_id: { type: "string" },
+              resourceType: { type: "string", enum: ["image", "video", "raw"] },
+              deliveryType: { type: "string", enum: ["upload", "authenticated", "private"] },
+              format: { type: "string", example: "pdf" },
               fileType: { type: "string", example: "application/pdf" },
               size: { type: "integer", minimum: 0, description: "Bytes." },
+              ...clientRefProperty,
             },
           },
           {
@@ -819,8 +878,42 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
           },
         ),
         responses: {
+          200: jsonResponse("The record already existed for this `clientRef`.", successEnvelope(schemaRef("TripFile"))),
           201: jsonResponse("File record created.", successEnvelope(schemaRef("TripFile"))),
           ...standardErrors,
+        },
+      },
+    },
+    "/files/{fileId}/url": {
+      get: {
+        tags: ["Files"],
+        operationId: "getFileUrl",
+        summary: "Get a fresh signed URL for one file",
+        description:
+          "Trip documents are stored as authenticated Cloudinary assets, so their URLs expire after ten minutes. Call this immediately before previewing, downloading or sharing rather than caching the result. Legacy public files return their permanent URL with a null `expiresAt`.",
+        parameters: [
+          {
+            name: "fileId",
+            in: "path",
+            required: true,
+            description: "MongoDB ID of the file record.",
+            schema: schemaRef("MongoId"),
+          },
+        ],
+        responses: {
+          200: jsonResponse(
+            "A URL valid for ten minutes.",
+            successEnvelope({
+              type: "object",
+              required: ["url"],
+              properties: {
+                url: { type: "string", format: "uri" },
+                expiresAt: { type: ["string", "null"], format: "date-time" },
+              },
+            }),
+          ),
+          ...standardErrors,
+          403: { $ref: "#/components/responses/Forbidden" },
         },
       },
     },
@@ -863,7 +956,8 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         tags: ["Discussion"],
         operationId: "sendTripMessage",
         summary: "Send a trip discussion message",
-        description: "Emits `new_discussion_message` with the populated message.",
+        description:
+          "Emits `new_discussion_message` with the populated message. Replaying with a known `clientRef` returns the existing message and `200`.",
         requestBody: jsonRequest(
           {
             type: "object",
@@ -871,6 +965,7 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
             properties: {
               tripId: schemaRef("MongoId"),
               text: { type: "string", minLength: 1 },
+              ...clientRefProperty,
             },
           },
           { tripId: "64b64c7f0f1e2d3c4b5a6978", text: "Meet in the lobby at 8:45." },
@@ -1200,6 +1295,67 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         },
       },
     },
+    "/sync/{tripId}/rev": {
+      get: {
+        tags: ["Sync"],
+        operationId: "getTripRevisions",
+        summary: "Read a trip's section revision counters",
+        description:
+          "Call once when the socket reconnects and once when the app returns to the foreground. Compare each counter with the last one seen and refetch only the sections that changed. This replaces polling, which cannot run while the app is backgrounded and would consume the request budget.",
+        parameters: [tripIdParameter],
+        responses: {
+          200: jsonResponse("Current counters.", successEnvelope(schemaRef("TripRevisions"))),
+          ...standardErrors,
+          403: { $ref: "#/components/responses/Forbidden" },
+        },
+      },
+    },
+    "/devices/register": {
+      post: {
+        tags: ["Devices"],
+        operationId: "registerDevice",
+        summary: "Register this device for push",
+        description:
+          "Upserts on the push token, so calling it on every app start is cheap and moves the device to the signed-in account. Expo reissues a token on reinstall.",
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            required: ["token", "platform"],
+            properties: {
+              token: { type: "string", description: "Expo push token.", example: "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]" },
+              platform: { type: "string", enum: ["ios", "android", "web"] },
+              deviceName: { type: "string" },
+            },
+          },
+          { token: "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]", platform: "ios", deviceName: "iPhone 14" },
+        ),
+        responses: {
+          200: jsonResponse("Device registered.", successEnvelope(schemaRef("Device"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/devices/{deviceId}": {
+      delete: {
+        tags: ["Devices"],
+        operationId: "unregisterDevice",
+        summary: "Unregister a device",
+        description: "Call on sign-out. Accepts the id returned by register, or the push token itself.",
+        parameters: [
+          {
+            name: "deviceId",
+            in: "path",
+            required: true,
+            description: "Device id from register, or the Expo push token.",
+            schema: { type: "string" },
+          },
+        ],
+        responses: {
+          200: jsonResponse("Device unregistered.", schemaRef("MessageResponse")),
+          ...standardErrors,
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -1216,6 +1372,7 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
       Forbidden: jsonResponse("The user is not a trip member or lacks the required role.", schemaRef("Error")),
       NotFound: jsonResponse("Requested resource was not found.", schemaRef("Error")),
       ServerError: jsonResponse("Unexpected server error.", schemaRef("Error")),
+      TooManyRequests: jsonResponse("Rate limit exceeded.", schemaRef("RateLimited")),
     },
     schemas: {
       AiStatus: {
@@ -1415,6 +1572,67 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         type: "string",
         enum: ["Bookings", "Tickets", "Photos", "Guides", "General"],
         default: "General",
+      },
+      MessageResponse: {
+        type: "object",
+        required: ["success", "message"],
+        properties: {
+          success: { type: "boolean", const: true },
+          message: { type: "string" },
+        },
+      },
+      RateLimited: {
+        type: "object",
+        required: ["success", "message"],
+        description:
+          "Sent with `429`. `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers accompany it.",
+        properties: {
+          success: { type: "boolean", const: false },
+          message: { type: "string" },
+          retryAfterSeconds: { type: "integer", minimum: 1 },
+        },
+        example: {
+          success: false,
+          message: "You're doing that too often. Give it a minute and try again.",
+          retryAfterSeconds: 143,
+        },
+      },
+      TripRevisions: {
+        type: "object",
+        required: ["tripId", "sections"],
+        description:
+          "One counter per independently refetchable section. A counter only ever increases, and starts at 0 for a section that has never changed.",
+        properties: {
+          tripId: schemaRef("MongoId"),
+          sections: {
+            type: "object",
+            required: ["trip", "members", "itinerary", "expenses", "budget", "checklist", "discussion", "files"],
+            properties: {
+              trip: { type: "integer", minimum: 0 },
+              members: { type: "integer", minimum: 0 },
+              itinerary: { type: "integer", minimum: 0 },
+              expenses: { type: "integer", minimum: 0 },
+              budget: { type: "integer", minimum: 0 },
+              checklist: { type: "integer", minimum: 0 },
+              discussion: { type: "integer", minimum: 0 },
+              files: { type: "integer", minimum: 0 },
+            },
+          },
+        },
+      },
+      Device: {
+        type: "object",
+        required: ["_id", "user", "token", "platform"],
+        properties: {
+          _id: schemaRef("MongoId"),
+          user: schemaRef("MongoId"),
+          token: { type: "string" },
+          platform: { type: "string", enum: ["ios", "android", "web"] },
+          deviceName: { type: "string" },
+          lastSeenAt: { type: "string", format: "date-time" },
+          createdAt: { type: "string", format: "date-time" },
+          updatedAt: { type: "string", format: "date-time" },
+        },
       },
       Error: {
         type: "object",
@@ -1682,11 +1900,23 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
         type: "object",
         required: ["url", "public_id", "originalName", "mimetype", "size"],
         properties: {
-          url: { type: "string", format: "uri" },
+          url: {
+            type: "string",
+            format: "uri",
+            description:
+              "Only durable for a `scope=public` upload. For a document this URL will not load on its own — pass the values below to `/files/finalize` and read the file back through its signed URL.",
+          },
           public_id: { type: "string" },
           originalName: { type: "string" },
           mimetype: { type: "string" },
           size: { type: "integer", minimum: 0, description: "Bytes." },
+          resourceType: {
+            type: "string",
+            enum: ["image", "video", "raw"],
+            description: "Cloudinary's own classification. PDFs are filed under `image`, not `raw`.",
+          },
+          deliveryType: { type: "string", enum: ["upload", "authenticated", "private"] },
+          format: { type: "string", example: "pdf" },
         },
       },
       TripFile: {
@@ -1699,8 +1929,21 @@ Connect Socket.IO to the same origin as this API, then emit \`join_trip\` with t
           name: { type: "string" },
           category: schemaRef("FileCategory"),
           notes: { type: "string" },
-          url: { type: "string", format: "uri" },
+          url: {
+            type: "string",
+            format: "uri",
+            description:
+              "A signed URL valid for ten minutes, minted fresh on every read. Do not cache it; call `GET /files/{fileId}/url` for another. Legacy public files return their permanent URL.",
+          },
+          urlExpiresAt: {
+            type: "string",
+            format: "date-time",
+            description: "Absent on legacy public files, which do not expire.",
+          },
           public_id: { type: "string" },
+          resourceType: { type: "string", enum: ["image", "video", "raw"] },
+          deliveryType: { type: "string", enum: ["upload", "authenticated", "private"] },
+          format: { type: "string" },
           fileType: { type: "string" },
           fileExtension: { type: "string" },
           size: { type: "integer", minimum: 0 },

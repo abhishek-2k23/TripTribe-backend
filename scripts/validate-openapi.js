@@ -8,6 +8,8 @@ import fileRoutes from "../routes/uploadRoutes.js";
 import discussionRoutes from "../routes/message.router.js";
 import aiRoutes from "../routes/ai.routes.js";
 import creditsRoutes from "../routes/credits.routes.js";
+import syncRoutes from "../routes/sync.routes.js";
+import deviceRoutes from "../routes/device.routes.js";
 import openApiDocument from "../docs/openapi.js";
 
 const routeGroups = [
@@ -21,6 +23,8 @@ const routeGroups = [
   ["/checklist", checklistRoutes],
   ["/files", fileRoutes],
   ["/discussion", discussionRoutes],
+  ["/sync", syncRoutes],
+  ["/devices", deviceRoutes],
 ];
 
 const normalizeExpressPath = (path) =>

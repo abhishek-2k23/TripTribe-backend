@@ -25,13 +25,15 @@ Authorization: Bearer <clerk-session-jwt>
 
 Authenticated handlers resolve the Clerk identity to a local MongoDB `User`. After the first Clerk sign-in, call `POST /users/sync`. If the Clerk identity is valid but no matching local user exists, protected routes return `404` with `{"message":"User not found in DB"}`.
 
-> Current implementation note: `POST /users/sync` expects a valid Clerk identity but does not use the `protect` middleware. Calling it without a token currently produces `500` instead of `401`.
+`POST /users/sync` is the one route that deliberately runs without `protect` — it is what creates the local user that `protect` looks up — so it checks the Clerk session directly instead. Without a valid session it returns `401`.
+
+Every route that names a trip also requires the caller to be a member of that trip. The trip is resolved from the URL, or from the itinerary day when a request names one, so pairing another trip's id with a day you can reach does not work. A non-member gets `403`.
 
 ### Content types
 
 - JSON routes: `Content-Type: application/json`
 - Raw file upload: `Content-Type: multipart/form-data`; the field name must be `file`.
-- No current route accepts query parameters.
+- `POST /files/upload-raw` takes one query parameter, `scope`. Everything else is path or body.
 
 ### Primitive formats
 
@@ -111,7 +113,42 @@ Common status codes are:
 | `401` | Missing or invalid Clerk authentication |
 | `403` | Not a trip member or insufficient trip role |
 | `404` | Resource or local user not found |
+| `429` | Rate limit exceeded |
 | `500` | Unexpected server/controller error |
+
+### Rate limits
+
+Authenticated requests are counted **per user**, not per IP: Indian carriers put many subscribers behind one CGNAT address, and counting by IP meant strangers exhausted each other's budget. Unauthenticated routes are still counted per IP. `GET /sync/:tripId/rev` and AI job polling each have their own bucket, because both are meant to arrive in bursts.
+
+Over the limit:
+
+```json
+{
+  "success": false,
+  "message": "You're doing that too often. Give it a minute and try again.",
+  "retryAfterSeconds": 143
+}
+```
+
+`RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers come with it. Every limit is a server environment variable (`RATE_LIMIT_MAX`, `RATE_LIMIT_PUBLIC_MAX`, `RATE_LIMIT_SYNC_MAX`, `RATE_LIMIT_JOB_MAX`, `RATE_LIMIT_WINDOW_MS`), and development defaults are far looser than production ones.
+
+### Idempotent creates
+
+`POST /itinerary/addActivity`, `/expenses/add/:tripId`, `/discussion/send` and `/files/finalize` accept a `clientRef`: a key generated **when the user acted**, not when the request was sent. Replaying a create with a key the server has already seen returns the document that exists, with `200` instead of `201`, and emits no second socket event.
+
+This is what makes an offline queue safe. A request can succeed on the server while the response is lost, and the client cannot tell that apart from a genuine failure.
+
+### Staying in sync
+
+Every write bumps a counter for the section it changed and emits one generic `trip_changed` event carrying `{ tripId, section, rev }`. On socket reconnect and on app foreground, call `GET /sync/:tripId/rev` once and refetch only the sections whose number moved.
+
+Do not poll on a timer: it does nothing while the app is backgrounded, where iOS suspends the timer, and it spends the request budget for no benefit.
+
+### File delivery
+
+Trip documents are stored as authenticated Cloudinary assets and have **no permanent URL**. A `TripFile.url` is a signed link valid for ten minutes, minted fresh on every read; `GET /files/:fileId/url` produces another. Do not cache one or write it into a record.
+
+Images the UI renders straight from a URL — trip covers, activity photos, profile pictures — must be uploaded with `?scope=public`, which keeps them on a durable public URL.
 
 ## Returned data types
 
@@ -317,11 +354,16 @@ Each `BudgetCategoryStat` contains `category: ExpenseCategory`, `spent: number`,
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `url` | URI string | Yes | Cloudinary URL |
+| `url` | URI string | Yes | Only durable for a `scope=public` upload. For a document this URL will not load on its own |
 | `public_id` | string | Yes | Cloudinary public ID |
 | `originalName` | string | Yes | Original client filename |
 | `mimetype` | string | Yes | Uploaded MIME type |
 | `size` | integer | Yes | Bytes |
+| `resourceType` | `image` \| `video` \| `raw` | No | Cloudinary's classification. PDFs are filed under `image`, not `raw` |
+| `deliveryType` | `upload` \| `authenticated` \| `private` | No | `authenticated` for documents |
+| `format` | string | No | e.g. `pdf` |
+
+Pass `resourceType`, `deliveryType` and `format` through to `/files/finalize` unchanged.
 
 ### `TripFile`
 
@@ -333,13 +375,35 @@ Each `BudgetCategoryStat` contains `category: ExpenseCategory`, `spent: number`,
 | `name` | string | Yes | User-facing filename |
 | `category` | `FileCategory` | Yes | Defaults to `General` |
 | `notes` | string | No | Defaults to empty string |
-| `url` | URI string | Yes | Cloudinary URL |
+| `url` | URI string | Yes | A signed URL valid for ten minutes, minted fresh on every read. Do not cache it or store it |
+| `urlExpiresAt` | `DateTime` | No | When `url` stops working. Absent on legacy public files |
 | `public_id` | string | Yes | Cloudinary public ID |
+| `resourceType` | `image` \| `video` \| `raw` | No | |
+| `deliveryType` | `upload` \| `authenticated` \| `private` | No | |
+| `format` | string | No | |
 | `fileType` | string | No | Usually MIME type |
 | `fileExtension` | string | No | Derived from text after the last `.` in `name` |
 | `size` | number | No | Bytes |
 | `createdAt` | `DateTime` | Yes | Mongoose timestamp |
 | `updatedAt` | `DateTime` | Yes | Mongoose timestamp |
+
+### `TripRevisions`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `tripId` | `MongoId` | |
+| `sections` | object | One integer counter per section: `trip`, `members`, `itinerary`, `expenses`, `budget`, `checklist`, `discussion`, `files`. Monotonically increasing; `0` means never changed |
+
+### `Device`
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `_id` | `MongoId` | Pass to `DELETE /devices/:deviceId` |
+| `user` | `MongoId` | Owner |
+| `token` | string | Expo push token |
+| `platform` | `ios` \| `android` \| `web` | |
+| `deviceName` | string | Optional |
+| `lastSeenAt` | `DateTime` | Updated on every register call |
 
 ### `Message`
 
@@ -370,24 +434,28 @@ Each `BudgetCategoryStat` contains `category: ExpenseCategory`, `spent: number`,
 | PUT | `/trips/:tripId` | Owner or editor | `200 Trip` |
 | PATCH | `/trips/:tripId/role` | Owner | `200 Trip` |
 | PATCH | `/trips/:tripId/budget` | Owner or editor | `200 Budget` |
-| POST | `/itinerary/addActivity` | Authenticated | `201 Itinerary` |
-| GET | `/itinerary/getTripItinerary/:tripId` | Authenticated | `200 itinerary data` |
-| POST | `/itinerary/activity/status` | Authenticated | `200 Itinerary` |
-| POST | `/itinerary/activity/comment` | Authenticated | `200 Itinerary` |
-| DELETE | `/itinerary/activity/:itineraryId/:activityId/:tripId` | Authenticated | `200 Itinerary` |
-| POST | `/expenses/add/:tripId` | Owner or editor | `201 Expense` |
+| POST | `/itinerary/addActivity` | Trip member | `201 Itinerary` (`200` on replay) |
+| GET | `/itinerary/getTripItinerary/:tripId` | Trip member | `200 itinerary data` |
+| POST | `/itinerary/activity/status` | Trip member | `200 Itinerary` |
+| POST | `/itinerary/activity/comment` | Trip member | `200 Itinerary` |
+| DELETE | `/itinerary/activity/:itineraryId/:activityId/:tripId` | Trip member | `200 Itinerary` |
+| POST | `/expenses/add/:tripId` | Owner or editor | `201 Expense` (`200` on replay) |
 | GET | `/expenses/debts/:tripId` | Trip member | `200 DebtSummary` |
 | GET | `/expenses/trip/:tripId/debts` | Trip member; deprecated alias | `200 DebtSummary` |
-| POST | `/expenses/settle` | Authenticated | `200 message` |
-| GET | `/expenses/budgetDashBoard/:tripId` | Authenticated | `200 BudgetDashboard` |
+| POST | `/expenses/settle` | The expense's payer only | `200 message` |
+| GET | `/expenses/budgetDashBoard/:tripId` | Trip member | `200 BudgetDashboard` |
 | POST | `/checklist/addItems/:tripId` | Owner or editor | `200 Checklist` |
-| GET | `/checklist/fetchLists/:tripId` | Public | `200 Checklist` |
-| POST | `/checklist/:tripId/checklist/:categoryId/items/:itemId` | Authenticated | `200 ChecklistItem` |
+| GET | `/checklist/fetchLists/:tripId` | Trip member | `200 Checklist` |
+| POST | `/checklist/:tripId/checklist/:categoryId/items/:itemId` | Trip member | `200 ChecklistItem` |
 | POST | `/files/upload-raw` | Authenticated | `200 RawUpload` |
-| POST | `/files/finalize` | Authenticated | `201 TripFile` |
-| GET | `/files/:tripId` | Authenticated | `200 TripFile[]` |
-| GET | `/discussion/:tripId` | Authenticated | `200 Message[]` |
-| POST | `/discussion/send` | Authenticated | `201 Message` |
+| POST | `/files/finalize` | Trip member | `201 TripFile` (`200` on replay) |
+| GET | `/files/:fileId/url` | Trip member | `200 signed URL` |
+| GET | `/files/:tripId` | Trip member | `200 TripFile[]` |
+| GET | `/discussion/:tripId` | Trip member | `200 Message[]` |
+| POST | `/discussion/send` | Trip member | `201 Message` (`200` on replay) |
+| GET | `/sync/:tripId/rev` | Trip member | `200 TripRevisions` |
+| POST | `/devices/register` | Authenticated | `200 Device` |
+| DELETE | `/devices/:deviceId` | Authenticated | `200 message` |
 
 ## Health routes
 
@@ -597,14 +665,18 @@ Updates a trip. Requires the `owner` or `editor` role.
 
 **JSON body:**
 
-| Field | Type | Required in practice | Notes |
+Only the fields present in the body are written. Send what changed.
+
+| Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `tripName` | string | Yes for renaming | Stored in `Trip.name` |
-| `description` | string | No | Falsy values fall back to existing description |
-| `startDate` | `DateTime` | Yes | Controller always calls `new Date(startDate)` |
-| `endDate` | `DateTime` | Yes | Controller always calls `new Date(endDate)` |
-| `coverImage` | `TripImage` | Yes | Controller directly reads `coverImage.url`; `public_id` is not updated |
-| `members` | `{ _id: MongoId, role: TripRole }[]` | No | Replaces the complete members array when non-empty |
+| `tripName` | string | No | Stored in `Trip.name`. `name` is accepted as an alias |
+| `description` | string | No | Written as sent, including an empty string |
+| `startDate` | `DateTime` | No | |
+| `endDate` | `DateTime` | No | Rejected with `400` if it falls before the start date |
+| `coverImage` | `TripImage` | No | `url` and `public_id` are each updated only when present |
+| `members` | `{ _id: MongoId, role: TripRole }[]` | No | Replaces the complete members array, but only when a non-empty one is sent |
+| `place` | `Place` | No | Structured destination, normally written by the AI planner |
+| `theme` | string | No | Trip archetype, normally written by the AI planner |
 
 ```json
 {
@@ -619,12 +691,12 @@ Updates a trip. Requires the `owner` or `editor` role.
 }
 ```
 
-Send the complete edit form. Although some values have fallbacks, omitting `coverImage`, `startDate`, or `endDate` can cause invalid behavior in the current controller.
+This used to be a full replace, which meant a rename had to re-send the members array or lose it, and omitting `coverImage` threw. Both are fixed: a background job writing `place` cannot revert someone's role change, and partial forms are safe.
 
 - `200`: `{ success: true, message: "Trip updated successfully", data: Trip }`.
-- `403`: not a member or role is not owner/editor.
-- `404`: trip not found.
-- Other errors: `400`, `401`, `500`.
+- `400`: nothing to update, or the end date precedes the start date.
+- `403`: not a member, or role is not owner/editor.
+- Other errors: `401`, `404`, `429`, `500`.
 
 ### `PATCH /trips/:tripId/role`
 
@@ -689,13 +761,14 @@ Creates the dated itinerary and/or named section if needed, adds an activity, an
 | --- | --- | --- | --- |
 | `tripId` | `MongoId` | Yes | Socket room and stored trip reference |
 | `section` | string | Yes | Exact matching is used to reuse a section |
-| `date` | `DateTime` | Yes | Exact stored date matching is used |
+| `date` | `DateTime` | Yes | Normalized to the nearest UTC midnight; an existing day anywhere in the surrounding 24 hours is reused |
 | `title` | string | Yes | Activity title |
 | `time` | string | No | Convention: `HH:mm` |
 | `location` | string | No | Free text |
 | `type` | `ActivityType` | No | Defaults to `Activity` |
 | `notes` | string | No | Free text |
 | `attachment` | URI string or `null` | No | Defaults to `null` |
+| `clientRef` | string | No | Idempotency key; a replay returns the existing day with `200` and emits nothing |
 
 ```json
 {
@@ -712,7 +785,8 @@ Creates the dated itinerary and/or named section if needed, adds an activity, an
 ```
 
 - `201`: `{ success: true, message: "Activity added successfully", data: Itinerary }`.
-- Errors: `400`, `401`, `404`, `500`.
+- `200`: `{ success: true, message: "Activity was already added", data: Itinerary }` when this `clientRef` already exists on the trip.
+- Errors: `400`, `401`, `403`, `404`, `429`, `500`.
 
 ### `GET /itinerary/getTripItinerary/:tripId`
 
@@ -759,8 +833,11 @@ Sets one activity's `isDone` value and emits `activity_updated` to the supplied 
 }
 ```
 
+`isDone` is a target state, not a flip: send `true` or `false` explicitly. A flip replayed twice from an offline queue undoes itself, so a missing or non-boolean value is rejected instead of being written through.
+
 - `200`: `{ success: true, data: Itinerary | null }`.
-- Errors: `400`, `401`, `404`, `500`.
+- `400`: `isDone` missing or not a boolean.
+- Other errors: `401`, `403`, `404`, `429`, `500`.
 
 ### `POST /itinerary/activity/comment`
 
@@ -806,8 +883,8 @@ Adds an expense and emits `expense_added`. Requires `owner` or `editor` accordin
 
 | Input | Type | Required | Notes |
 | --- | --- | --- | --- |
-| Path `tripId` | `MongoId` | Yes | Used by role middleware |
-| Body `selectedTripId` | `MongoId` | Yes | Used by the controller as the stored trip ID; send the same value as path `tripId` |
+| Path `tripId` | `MongoId` | Yes | The trip the expense is stored against. Authoritative |
+| Body `selectedTripId` | `MongoId` | No | Ignored. Kept only so older clients don't break |
 | Body `title` | string | Yes | Expense title |
 | Body `description` | string | No | Free text |
 | Body `amount` | number > 0 | Yes | Divided equally for `equally` and `selected` |
@@ -815,10 +892,10 @@ Adds an expense and emits `expense_added`. Requires `owner` or `editor` accordin
 | Body `splitType` | `SplitType` | Yes | `none` produces no split details |
 | Body `participants` | `MongoId[]` | No | Defaults to `[]`; payer is always added |
 | Body `paidBy` | `MongoId` | No | Defaults to current user |
+| Body `clientRef` | string | No | Idempotency key; a replay returns the existing expense with `200` |
 
 ```json
 {
-  "selectedTripId": "64b64c7f0f1e2d3c4b5a6978",
   "title": "Dinner",
   "description": "First-night group dinner",
   "amount": 4200,
@@ -832,9 +909,9 @@ Adds an expense and emits `expense_added`. Requires `owner` or `editor` accordin
 Both `equally` and `selected` currently calculate equal shares across the unique participants plus payer. The payer is omitted from `splitDetails`.
 
 - `201`: `{ success: true, data: Expense }`.
-- `403`: caller lacks membership/role for path trip.
-- `404`: body `selectedTripId` trip not found.
-- Other errors: `400`, `401`, `500`.
+- `200`: the same, when this `clientRef` was already recorded.
+- `403`: caller is not an owner or editor of the trip.
+- Other errors: `400`, `401`, `404`, `429`, `500`.
 
 ### `GET /expenses/debts/:tripId`
 
@@ -868,11 +945,12 @@ Marks a single debtor split on an expense as settled.
 }
 ```
 
-- `200`: `{ success: true, message: "Debt settled" }`.
-- `404`: split not found.
-- Other errors: `400`, `401`, `500`.
+Only the person who paid the expense can settle it against a debtor: they are the one who knows the money arrived.
 
-Current access-control note: this route requires authentication but does not verify that the caller belongs to the expense's trip or is authorized to settle the specified user's split.
+- `200`: `{ success: true, message: "Debt settled" }`.
+- `403`: the caller did not pay this expense.
+- `404`: expense or split not found.
+- Other errors: `400`, `401`, `429`, `500`.
 
 ### `GET /expenses/budgetDashBoard/:tripId`
 
@@ -883,10 +961,8 @@ Returns budget analytics. The `budgetDashBoard` casing must be used exactly as s
 | `tripId` | `MongoId` | Yes |
 
 - `200`: `{ success: true, data: BudgetDashboard }`.
-- `404`: trip not found.
-- Other errors: `400`, `401`, `500`.
-
-Current access-control note: authentication is required, but the controller does not check trip membership.
+- `403`: caller is not a member of the trip.
+- Other errors: `400`, `401`, `404`, `429`, `500`.
 
 ## Checklist routes
 
@@ -940,10 +1016,10 @@ Adds or removes the current user in the item's `completedBy` array and emits `ta
 
 - `true`: uses `$addToSet` to add the current user.
 - `false`: removes the current user.
+- `isChecked` must be present and boolean. A target state replayed twice is harmless; a flip would undo itself, so a missing or non-boolean value is rejected rather than guessed at.
 - `200`: `{ success: true, data: ChecklistItem }` with populated `completedBy` users.
-- Errors: `400`, `401`, `404`, `500`.
-
-Current access-control note: authentication is required, but this route does not run the trip-role/member middleware.
+- `400`: `isChecked` missing or not a boolean.
+- Other errors: `401`, `403`, `404`, `429`, `500`.
 
 ## File routes
 
@@ -953,10 +1029,16 @@ File creation is a two-step process: upload bytes with `/files/upload-raw`, then
 
 Uploads one file to Cloudinary folder `TripTribe` using `resource_type: auto`.
 
-- Authentication: required.
+- Authentication: required. No membership check is possible here — the same route uploads trip covers, which are chosen before the trip exists — so the trip is checked at `finalize`.
 - Content type: `multipart/form-data`.
 - Multipart field: `file` containing one binary file.
-- No explicit file type or size limit is configured in the current Multer middleware.
+- Size limit: 25 MB, rejected locally with `413` before the Cloudinary round trip.
+
+| Query parameter | Values | Default | Meaning |
+| --- | --- | --- | --- |
+| `scope` | `public`, `document` | `document` | `public` keeps a durable URL, for images rendered directly from one. Anything else stores an authenticated asset with no lasting URL |
+
+**Getting this wrong is silent.** A cover image uploaded without `?scope=public` returns a URL that stops working ten minutes later, and by then it has been written onto the trip. Add `?scope=public` to the cURL call below for covers, activity photos and profile pictures.
 
 Example with cURL:
 
@@ -980,10 +1062,14 @@ Creates the MongoDB file record after raw upload.
 | `name` | string | Yes | Include an extension; controller derives `fileExtension` from text after the last `.` |
 | `category` | `FileCategory` | No | Defaults to `General` |
 | `notes` | string | No | Defaults to empty string |
-| `url` | URI string | Yes | From raw upload response |
+| `url` | URI string | Yes | From raw upload response. Not stored for an authenticated document |
 | `public_id` | string | Yes | From raw upload response |
+| `resourceType` | `image`, `video`, `raw` | No | From raw upload response; needed to sign the file later |
+| `deliveryType` | `upload`, `authenticated`, `private` | No | From raw upload response |
+| `format` | string | No | From raw upload response, e.g. `pdf` |
 | `fileType` | string | No | Usually the upload `mimetype` |
 | `size` | integer >= 0 | No | Bytes from raw upload response |
+| `clientRef` | string | No | Idempotency key; a replay returns the existing record with `200` |
 
 ```json
 {
@@ -999,9 +1085,28 @@ Creates the MongoDB file record after raw upload.
 ```
 
 - `201`: `{ success: true, data: TripFile }` with `uploadedBy` populated.
-- Errors: `400`, `401`, `404`, `500`.
+- `200`: the same, when this `clientRef` was already finalized.
+- Errors: `400`, `401`, `403`, `404`, `429`, `500`.
 
-Current access-control note: this route does not verify that the user belongs to `tripId`.
+### `GET /files/:fileId/url`
+
+A fresh signed URL for one file. Membership is resolved from the file's own trip.
+
+| Path parameter | Type | Required |
+| --- | --- | --- |
+| `fileId` | `MongoId` | Yes |
+
+```json
+{
+  "success": true,
+  "data": {
+    "url": "https://api.cloudinary.com/v1_1/<cloud>/image/download?...",
+    "expiresAt": "2026-09-17T09:41:00.000Z"
+  }
+}
+```
+
+Call it immediately before previewing, downloading or sharing rather than caching the result. A legacy public file returns its permanent URL with `expiresAt: null`. Non-members get `403`.
 
 ### `GET /files/:tripId`
 
@@ -1013,9 +1118,8 @@ Returns files sorted by `createdAt` descending.
 
 - `200`: `{ success: true, count: integer, data: TripFile[] }`.
 - `uploadedBy` is populated with `name` and `imageUrl`.
-- Errors: `400`, `401`, `404`, `500`.
-
-Current access-control note: this route does not verify trip membership.
+- Each authenticated file carries a freshly signed `url` and a `urlExpiresAt`, so listing a trip's files is still one request.
+- Errors: `400`, `401`, `403`, `404`, `429`, `500`.
 
 ## Discussion routes
 
@@ -1029,9 +1133,7 @@ Returns trip messages sorted chronologically by `createdAt` ascending.
 
 - `200`: `{ success: true, data: Message[] }`.
 - Each `sender` is populated with `name` and `imageUrl`.
-- Errors: `400`, `401`, `404`, `500`.
-
-Current access-control note: authentication is required, but trip membership is not checked.
+- Errors: `400`, `401`, `403`, `404`, `429`, `500`.
 
 ### `POST /discussion/send`
 
@@ -1041,18 +1143,19 @@ Creates a message and emits `new_discussion_message` to the trip's Socket.IO roo
 | --- | --- | --- |
 | `tripId` | `MongoId` | Yes |
 | `text` | non-empty trimmed string | Yes |
+| `clientRef` | string | No |
 
 ```json
 {
   "tripId": "64b64c7f0f1e2d3c4b5a6978",
-  "text": "Meet in the lobby at 8:45."
+  "text": "Meet in the lobby at 8:45.",
+  "clientRef": "msg-2026-09-17T09:12:03.114Z-a1b2"
 }
 ```
 
 - `201`: `{ success: true, data: Message }` with populated sender.
-- Errors: `400`, `401`, `404`, `500`.
-
-Current access-control note: authentication is required, but trip membership is not checked.
+- `200`: the same message, when this `clientRef` was already sent. No second socket event is emitted.
+- Errors: `400`, `401`, `403`, `404`, `429`, `500`.
 
 ## AI routes
 
@@ -1127,6 +1230,55 @@ Owner or editor. Marks the proposal dismissed.
 
 The latest 100 ledger entries, newest first: `{ bucket, delta, reason, job, note, createdAt }`. Reasons are `grant`, `expire`, `hold`, `refund`, `purchase` and `adjustment`.
 
+## Sync routes
+
+### `GET /sync/:tripId/rev`
+
+Trip member. Returns one revision counter per independently refetchable section.
+
+```json
+{
+  "success": true,
+  "data": {
+    "tripId": "64b64c7f0f1e2d3c4b5a6978",
+    "sections": {
+      "trip": 3,
+      "members": 1,
+      "itinerary": 12,
+      "expenses": 7,
+      "budget": 2,
+      "checklist": 4,
+      "discussion": 31,
+      "files": 2
+    }
+  }
+}
+```
+
+A counter only ever increases, and a section that has never changed reads `0`. Call this once on socket reconnect and once when the app returns to the foreground, then refetch only the sections whose number differs from the last one you saw.
+
+## Device routes
+
+### `POST /devices/register`
+
+Authenticated. Registers this installation for push. Safe to call on every app start: it upserts on the token, which also moves the device to the account currently signed in.
+
+```json
+{
+  "token": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]",
+  "platform": "ios",
+  "deviceName": "iPhone 14"
+}
+```
+
+Returns `200` with the `Device`. An invalid Expo token or an unknown platform is `400`.
+
+### `DELETE /devices/:deviceId`
+
+Authenticated. Call on sign-out. `deviceId` may be the id returned by register or the push token itself. Only the owner's own devices can be removed; anything else is `404`.
+
+Notifications are data-only messages that wake the app to run a revision catch-up. The person who made a change is never notified about it, writes to one trip within ten seconds collapse into a single send, and a token Expo reports as unregistered is deleted.
+
 ## Socket.IO contract
 
 Connect Socket.IO to the same origin as the HTTP API.
@@ -1152,16 +1304,26 @@ Connect Socket.IO to the same origin as the HTTP API.
 | `task_toggled` | A checklist item's completion changed |
 | `new_discussion_message` | A discussion message was created |
 | `user_typing` | Typing state changed |
+| `trip_changed` | Any write to the trip: `{ tripId, section, rev }`. One handler replaces the per-write events above for catch-up purposes |
 
 ## Known contract and implementation cautions
 
-1. `POST /users/sync` currently returns `500` without a Clerk identity instead of a clean `401`.
-2. `GET /checklist/fetchLists/:tripId` is public, so checklist data can currently be read without authentication.
-3. Several authenticated file, discussion, checklist-toggle, expense-settlement, and budget-dashboard routes do not independently verify trip membership. Itinerary routes now do: routes that name an itinerary day resolve the trip from that day, and non-members get `403`.
-4. `PUT /trips/:tripId` should receive a complete edit form, especially `coverImage`, `startDate`, and `endDate`.
-5. Expense creation uses the path `tripId` for role authorization but body `selectedTripId` for creation. Clients must send the same ID in both locations.
-6. `GET /expenses/trip/:tripId/debts` is deprecated; use `GET /expenses/debts/:tripId`.
-7. The budget dashboard route uses the unusual case-sensitive spelling `budgetDashBoard`.
-8. The expense model defaults `currency` to `USD`, while trip budgets default to `INR`.
-9. Raw file upload currently has no explicit MIME-type allowlist or size limit.
+1. `GET /expenses/trip/:tripId/debts` is deprecated; use `GET /expenses/debts/:tripId`.
+2. The budget dashboard route uses the unusual case-sensitive spelling `budgetDashBoard`.
+3. The expense model defaults `currency` to `USD`, while trip budgets default to `INR`.
+4. Raw file upload has a 25 MB limit but still no MIME-type allowlist.
+5. `Checklist.tripId` is stored as a string while every other trip reference is an ObjectId.
+6. A cover image uploaded without `?scope=public` gets a URL that expires in ten minutes, and nothing warns you at the time.
+
+### Fixed in Phase 10
+
+- `POST /users/sync` returns `401` without a Clerk session instead of `500`.
+- `GET /checklist/fetchLists/:tripId` requires membership; it used to be readable by anyone signed in or not.
+- File, discussion, checklist, expense and budget routes all verify trip membership.
+- Only the person who paid an expense can settle it.
+- Trip documents are no longer delivered from permanent public URLs. **Anything uploaded before this that has already leaked stays leaked — rotate genuinely sensitive documents.**
+- `PUT /trips/:tripId` is a partial update: sending only the fields you changed no longer wipes the rest, and omitting `coverImage` no longer throws.
+- Expense creation reads the trip from the URL only; body `selectedTripId` is ignored.
+- `yourBalance` in the debt summary is no longer always `0`.
+- Activity status and checklist toggles require an explicit boolean; a missing value is `400` rather than a silent write.
 
