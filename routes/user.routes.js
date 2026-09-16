@@ -7,12 +7,14 @@ import {
   updateProfile
 } from "../controllers/user.controller.js";
 import { deleteMyAccount, exportMyData } from "../controllers/account.controller.js";
-import { protect } from "../middleware/auth.js";
+import { protect, requireSignedIn } from "../middleware/auth.js";
 
 const router = express.Router();
 
-// Sync user after login (can also use Clerk webhook)
-router.post("/sync", syncUser);
+// Sync user after login (can also use Clerk webhook).
+// `requireSignedIn`, not `protect`: this route is what creates the Mongo user that `protect` looks
+// up, so requiring one here would 404 every first sign-in. It still needs a valid Clerk session.
+router.post("/sync", requireSignedIn, syncUser);
 
 // Protected routes
 router.get("/me", protect, getMe);
