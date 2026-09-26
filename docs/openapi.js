@@ -196,6 +196,7 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
     { name: "Places", description: "Google Places search, details, photos and static maps, proxied with per-user daily quotas." },
     { name: "Weather", description: "Daily forecast, or typical weather for dates beyond the forecast, from Open-Meteo." },
     { name: "Templates", description: "Pre-made itineraries to browse and clone into a new trip." },
+    { name: "Home", description: "Cross-trip aggregates for the Home dashboard and the Wallet." },
   ],
   security: [{ ClerkBearerAuth: [] }],
   paths: {
@@ -1549,6 +1550,33 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
         },
       },
     },
+    "/home": {
+      get: {
+        tags: ["Home"],
+        operationId: "getHome",
+        summary: "Everything the Home dashboard shows, in one call",
+        description:
+          "The next trip (ongoing first, then soonest) with weather for its next five days and plan progress, up to three more current trips, money owed and owing across trips, the five newest events in the user's trips, featured templates (in-season first) and a suggestion. Cached for 60 seconds per user; `?fresh=1` skips the cache for pull-to-refresh.",
+        parameters: [{ name: "fresh", in: "query", required: false, schema: { type: "string", enum: ["1"] } }],
+        responses: {
+          200: jsonResponse("The dashboard.", successEnvelope(schemaRef("HomeDashboard"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/wallet": {
+      get: {
+        tags: ["Home"],
+        operationId: "getWallet",
+        summary: "Balances, open debts and budgets across every trip, plus the credit balance",
+        description:
+          "Amounts are in each trip's budget currency, and `totals` has one entry per currency. Each trip lists the caller's own unsettled debts: `owed` (someone owes the caller, who can settle it as the payer) and `owe`.",
+        responses: {
+          200: jsonResponse("The wallet.", successEnvelope(schemaRef("Wallet"))),
+          ...standardErrors,
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -1568,6 +1596,158 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
       TooManyRequests: jsonResponse("Rate limit exceeded.", schemaRef("RateLimited")),
     },
     schemas: {
+      CompactTrip: {
+        type: "object",
+        properties: {
+          _id: schemaRef("MongoId"),
+          name: { type: "string" },
+          location: { type: "string" },
+          image: schemaRef("TripImage"),
+          theme: { oneOf: [schemaRef("TripTheme"), { type: "null" }] },
+          place: { oneOf: [schemaRef("TripPlace"), { type: "null" }] },
+          startDate: { type: "string", format: "date-time" },
+          endDate: { type: "string", format: "date-time" },
+          memberCount: { type: "integer" },
+          currency: { type: "string" },
+          status: { type: "string", enum: ["upcoming", "ongoing"] },
+          daysUntil: { type: "integer", minimum: 0 },
+          totalDays: { type: "integer" },
+        },
+      },
+      HomeDashboard: {
+        type: "object",
+        required: ["user", "nextTrip", "activeTrips", "balances", "recentActivity", "featuredTemplates", "suggestion"],
+        properties: {
+          user: {
+            type: "object",
+            properties: {
+              _id: schemaRef("MongoId"),
+              name: { type: "string" },
+              imageUrl: { type: "string" },
+              creditBalance: { type: "integer" },
+            },
+          },
+          nextTrip: {
+            oneOf: [
+              {
+                allOf: [
+                  schemaRef("CompactTrip"),
+                  {
+                    type: "object",
+                    properties: {
+                      plannedDays: { type: "integer" },
+                      activityCount: { type: "integer" },
+                      doneCount: { type: "integer" },
+                      weather: {
+                        type: ["object", "null"],
+                        properties: {
+                          location: { type: "string" },
+                          days: { type: "array", items: schemaRef("WeatherDay") },
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+              { type: "null" },
+            ],
+          },
+          activeTrips: { type: "array", items: schemaRef("CompactTrip") },
+          tripCount: { type: "integer" },
+          balances: {
+            type: "object",
+            properties: {
+              currency: { type: "string" },
+              youAreOwed: { type: "number" },
+              youOwe: { type: "number" },
+              owedBy: { type: "array", items: { type: "string" }, description: "First names, most owed first." },
+              oweTo: { type: "array", items: { type: "string" } },
+              otherCurrencies: {
+                type: "array",
+                items: { type: "object", properties: { currency: { type: "string" }, youAreOwed: { type: "number" }, youOwe: { type: "number" } } },
+              },
+            },
+          },
+          recentActivity: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                kind: { type: "string", enum: ["expense", "message", "activity", "member"] },
+                actor: { type: ["object", "null"], description: "Absent for activities, which record no author. `name` is \"You\" for the caller." },
+                text: { type: "string" },
+                tripId: schemaRef("MongoId"),
+                tripName: { type: ["string", "null"] },
+                at: { type: "string", format: "date-time" },
+              },
+            },
+          },
+          featuredTemplates: { type: "array", items: schemaRef("TemplateSummary") },
+          suggestion: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["seasonal", "plan"] },
+              text: { type: "string" },
+              templateSlug: { type: ["string", "null"] },
+            },
+          },
+        },
+      },
+      WalletDebt: {
+        type: "object",
+        properties: {
+          direction: { type: "string", enum: ["owed", "owe"] },
+          counterpart: schemaRef("UserSummary"),
+          amount: { type: "number" },
+          title: { type: "string" },
+          expenseId: schemaRef("MongoId"),
+        },
+      },
+      Wallet: {
+        type: "object",
+        properties: {
+          totals: {
+            type: "array",
+            items: { type: "object", properties: { currency: { type: "string" }, youAreOwed: { type: "number" }, youOwe: { type: "number" } } },
+          },
+          trips: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                trip: {
+                  type: "object",
+                  properties: {
+                    _id: schemaRef("MongoId"),
+                    name: { type: "string" },
+                    location: { type: "string" },
+                    image: schemaRef("TripImage"),
+                    theme: { oneOf: [schemaRef("TripTheme"), { type: "null" }] },
+                    startDate: { type: "string", format: "date-time" },
+                    endDate: { type: "string", format: "date-time" },
+                    status: { type: "string", enum: ["upcoming", "ongoing", "past"] },
+                    role: schemaRef("TripRole"),
+                  },
+                },
+                currency: { type: "string" },
+                youAreOwed: { type: "number" },
+                youOwe: { type: "number" },
+                debts: { type: "array", items: schemaRef("WalletDebt") },
+                budget: {
+                  type: "object",
+                  properties: {
+                    total: { type: "number" },
+                    spent: { type: "number" },
+                    remaining: { type: "number" },
+                    utilization: { type: "number" },
+                  },
+                },
+              },
+            },
+          },
+          credits: { type: "object", description: "Same shape as `GET /credits/balance`." },
+        },
+      },
       TripTheme: {
         type: "string",
         enum: ["monsoon", "mountain", "coast", "desert", "heritage", "wild", "city"],

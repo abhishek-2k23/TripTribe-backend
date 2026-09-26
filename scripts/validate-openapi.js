@@ -13,6 +13,7 @@ import deviceRoutes from "../routes/device.routes.js";
 import placesRoutes from "../routes/places.routes.js";
 import weatherRoutes from "../routes/weather.routes.js";
 import templateRoutes from "../routes/template.routes.js";
+import homeRoutes from "../routes/home.routes.js";
 import openApiDocument from "../docs/openapi.js";
 
 const routeGroups = [
@@ -31,6 +32,7 @@ const routeGroups = [
   ["/places", placesRoutes],
   ["/weather", weatherRoutes],
   ["/templates", templateRoutes],
+  ["", homeRoutes],
 ];
 
 // A param's own pattern (`:photoRef(*)`) isn't part of the documented path.

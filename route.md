@@ -1321,6 +1321,35 @@ Authenticated. The whole template, with `itinerary: [{ day, title, activities: [
 
 Authenticated. `{ startDate: "YYYY-MM-DD", name?, clientRef? }`. Creates a trip owned by the caller, from `startDate` for the template's length, with every activity on its day (`source: "template"`), the template's destination `place` and `theme`, and no cover image. `201` with the populated trip; with a `clientRef` that already made a trip, `200` with that trip instead.
 
+## Home routes
+
+### `GET /home`
+
+Authenticated. Everything the Home dashboard shows, cached for 60 seconds per user (`?fresh=1` skips the cache):
+- `user`: name, photo and credit balance.
+- `nextTrip`: the ongoing trip, otherwise the soonest upcoming one, or `null`. It carries `status`, `daysUntil`, `totalDays`, `plannedDays` and activity counts. `weather` covers its next five days: forecast, or `typical` beyond the forecast window.
+- `activeTrips`: up to three more current trips.
+- `balances`: `youAreOwed` and `youOwe` in the headline currency, the first names involved, and `otherCurrencies`.
+- `recentActivity`: the five newest expenses, messages, activities and member joins across the caller's trips. `actor.name` is `"You"` for the caller, and activities have no actor.
+- `featuredTemplates`: in-season templates first.
+- `suggestion`: `seasonal` with a `templateSlug`, or `plan`.
+
+### `GET /wallet`
+
+Authenticated. `{ totals: [{ currency, youAreOwed, youOwe }], trips: [...], credits }`. Each trip entry has:
+- `trip`: `status` is `upcoming`, `ongoing` or `past`, plus the caller's `role`.
+- `currency`, `youAreOwed` and `youOwe`.
+- `debts`: `direction` is `owed` (the counterpart owes the caller, who can settle it with `POST /expenses/settle`) or `owe`.
+- `budget`: `{ total, spent, remaining, utilization }`.
+
+Amounts are in each trip's budget currency, never converted.
+
+## Push notifications
+
+Two kinds, both carrying `data.type`:
+- `trip_changed`: data-only, Android channel `sync`, `{ tripId, sections }`. Sent to members other than the person who made the change, debounced 10 s per trip.
+- `job_done`: visible, channel `trip-updates`, `{ jobId, kind, status, tripId, proposalId }`. Sent to the requester when an AI **plan** succeeds or fails. Not sent on cancel.
+
 ## Trip places and themes
 
 Trips carry a structured `place` beside the free-text `location`, and a `theme` (`monsoon`, `mountain`, `coast`, `desert`, `heritage`, `wild` or `city`). Neither is sent by clients. The server resolves `place` from `location` when a trip is created or first opened (a location Google can't match is retried at most weekly), derives `theme` from the destination, the travel months and the typical climate, and bumps the `trip` revision. An AI plan later refines `theme` from the places it gathered.
