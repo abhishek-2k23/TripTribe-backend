@@ -27,6 +27,9 @@ import aiRouter from './routes/ai.routes.js';
 import creditsRouter from './routes/credits.routes.js';
 import syncRouter from './routes/sync.routes.js';
 import deviceRouter from './routes/device.routes.js';
+import placesRouter from './routes/places.routes.js';
+import weatherRouter from './routes/weather.routes.js';
+import templateRouter from './routes/template.routes.js';
 import scalarDocsRouter from './docs/scalar.js';
 import { serve as serveInngest } from 'inngest/express';
 import { inngest } from './lib/inngest.js';
@@ -149,6 +152,9 @@ app.use("/api/ai", aiRouter);
 app.use("/api/credits", creditsRouter);
 app.use("/api/sync", syncRouter);
 app.use("/api/devices", deviceRouter);
+app.use("/api/places", placesRouter);
+app.use("/api/weather", weatherRouter);
+app.use("/api/templates", templateRouter);
 
 app.get('/', (req, res) => {
   res.json({

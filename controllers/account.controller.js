@@ -25,6 +25,7 @@ import CreditLedger from "../models/creditLedger.model.js";
 import CreditAccount from "../models/creditAccount.model.js";
 import Device from "../models/device.model.js";
 import TripRevision from "../models/tripRevision.model.js";
+import UsageCounter from "../models/usageCounter.model.js";
 
 const DELETED_NAME = "Deleted user";
 
@@ -159,6 +160,8 @@ export const deleteMyAccount = async (req, res, next) => {
       CreditAccount.deleteOne({ _id: userId }),
       // Push targets, or the phone keeps being woken for trips this account no longer has.
       Device.deleteMany({ user: userId }),
+      // Daily quota counters; they expire on their own within two days, but hold the user id until then.
+      UsageCounter.deleteMany({ user: userId }),
     ]);
     summary.aiConversationsDeleted = aiThreadIds.length;
 

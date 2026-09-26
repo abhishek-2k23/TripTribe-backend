@@ -1279,6 +1279,54 @@ Authenticated. Call on sign-out. `deviceId` may be the id returned by register o
 
 Notifications are data-only messages that wake the app to run a revision catch-up. The person who made a change is never notified about it, writes to one trip within ten seconds collapse into a single send, and a token Expo reports as unregistered is deleted.
 
+## Place routes
+
+The Google Maps key never leaves the server; these routes proxy it. Each has a per-user **daily quota** on top of the rate limit (`config/quotas.js`), spent only when the server actually calls Google — cached answers are free. A spent quota is `429` with `code: "QUOTA_EXCEEDED"` and `retryAfterSeconds` until midnight UTC. Maps not configured, or the API switched off in the Google project, is `503` with `code: "PLACES_NOT_CONFIGURED"`; an unreachable Google is `502`.
+
+### `GET /places/search?q=&near=lat,lng`
+
+Authenticated. Place picker search: up to 8 `{ placeId, name, address, lat, lng, types, photoRef }`, biased toward `near` (usually the trip's `place`). `q` is 2–120 characters. Debounce on the client; identical queries are cached for 10 minutes.
+
+### `GET /places/:placeId`
+
+Authenticated. One place with `country`, `admin1` and up to three `photos: [{ ref, width, height, attributions }]`. Served from the place cache (30 days) when it can be.
+
+### `GET /places/photo/:photoRef?w=`
+
+Authenticated. `photoRef` is the photo's resource name, slashes included (`places/…/photos/…`). Redirects (`302`) to a short-lived image on Google's CDN; `w` snaps to 200, 400, 800 or 1200. Show the photo's attributions wherever it appears.
+
+### `GET /places/static-map?stops=&w=&h=&theme=`
+
+Authenticated. A PNG at 2× scale: `stops` is up to 12 `lat,lng` pairs joined by `|`, drawn as numbered markers (1–9, then A–Z) in order and joined by a line; one stop is a close-up. `w` and `h` are 80–640 (default 640×240); `theme=dark` gives a night basemap. Images are cached per stop-set, size and theme for a day. Image loaders must send the bearer token as a request header.
+
+## Weather routes
+
+### `GET /weather?tripId=` · `GET /weather?lat=&lng=&from=&to=`
+
+Authenticated; a `tripId` requires membership. Returns `{ location: { name, lat, lng, source, elevation } | null, days: [...] }` with one entry per day (at most 31). Days inside the 16-day forecast are `source: "forecast"` with a rain chance; later ones are the same dates last year, `"typical"`. Each day carries `summary`, `tempMaxC`, `tempMinC`, `precipitationMm` and `severe`. A trip whose location can't be placed returns `location: null` and no days. Responses are cached for 3 hours.
+
+## Template routes
+
+Pre-made itineraries. Days are relative ("day 2") until cloned. Places were resolved against Google by the seed script, never typed in.
+
+### `GET /templates?theme=&days=&maxDays=&budget=&month=&featured=&limit=`
+
+Authenticated. Summaries without itineraries, featured first, then most cloned. `theme` is a trip theme; `budget` is `budget`, `mid` or `premium`; `month` (1–12) keeps templates recommended for that month. `limit` defaults to 20, at most 50.
+
+### `GET /templates/:slug`
+
+Authenticated. The whole template, with `itinerary: [{ day, title, activities: [{ section, time, title, type, place, durationMin, estCost, notes }] }]`.
+
+### `POST /templates/:slug/clone`
+
+Authenticated. `{ startDate: "YYYY-MM-DD", name?, clientRef? }`. Creates a trip owned by the caller, from `startDate` for the template's length, with every activity on its day (`source: "template"`), the template's destination `place` and `theme`, and no cover image. `201` with the populated trip; with a `clientRef` that already made a trip, `200` with that trip instead.
+
+## Trip places and themes
+
+Trips carry a structured `place` beside the free-text `location`, and a `theme` (`monsoon`, `mountain`, `coast`, `desert`, `heritage`, `wild` or `city`). Neither is sent by clients. The server resolves `place` from `location` when a trip is created or first opened (a location Google can't match is retried at most weekly), derives `theme` from the destination, the travel months and the typical climate, and bumps the `trip` revision. An AI plan later refines `theme` from the places it gathered.
+
+An activity may carry `place: { placeId, name, address, lat, lng, types, photoRef }` from the place search. When `placeId` is one the search returned, the server replaces the other fields with its own cached copy; a place without valid coordinates is dropped and the text `location` stays.
+
 ## Socket.IO contract
 
 Connect Socket.IO to the same origin as the HTTP API.

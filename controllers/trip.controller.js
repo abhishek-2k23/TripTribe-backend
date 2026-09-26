@@ -1,5 +1,6 @@
 import Trip from "../models/trip.model.js";
 import { bumpRevisionFor } from "../lib/revisions.js";
+import { ensureTripPlace } from "../lib/tripPlace.js";
 
 export const createTrip = async (req, res, next) => {
   try {
@@ -68,6 +69,8 @@ export const createTrip = async (req, res, next) => {
       {path: "createdBy", select: "name email imageUrl"},
       {path: "members.user", select: "name email imageUrl"},
     ])
+    // Resolve the destination in the background; clients pick it up from the trip revision bump.
+    void ensureTripPlace(trip, { io: req.app.get("socketio") });
     res.status(201).json({
       success: true,
       data: trip,
@@ -270,6 +273,10 @@ export const getSingleTrip = async (req, res, next) => {
         message: "Trip not found or access denied",
       });
     }
+
+    // Trips from before places existed get one lazily (ai-plan §3.1). Not awaited: the trip opens
+    // now, and the "trip" revision bump tells clients to refetch once the place and theme land.
+    void ensureTripPlace(trip, { io: req.app.get("socketio") });
 
     res.status(200).json({
       success: true,

@@ -16,14 +16,23 @@ const activitySchema = new mongoose.Schema({
   // Structured place, when the activity came from a place search or an AI plan (ai-plan §3.2).
   place: {
     type: new mongoose.Schema(
-      { placeId: String, name: String, address: String, lat: Number, lng: Number },
+      {
+        placeId: String,
+        name: String,
+        address: String,
+        lat: Number,
+        lng: Number,
+        types: { type: [String], default: undefined },
+        // A Places photo resource name, served through GET /api/places/photo/*.
+        photoRef: String,
+      },
       { _id: false }
     ),
     default: undefined,
   },
   estCost: Number, // per person, trip currency
   durationMin: Number,
-  source: { type: String, enum: ["manual", "ai"], default: "manual" },
+  source: { type: String, enum: ["manual", "ai", "template"], default: "manual" },
   // Idempotency key from the creating client or AI accept; a repeat create returns the original.
   clientRef: { type: String, default: undefined },
   // Internal discussion/comments array

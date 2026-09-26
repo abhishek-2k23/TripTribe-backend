@@ -1,5 +1,5 @@
 import Itinerary from "../models/Itinerary.model.js";
-import { addActivityToDay, pickActivityFields } from "../lib/itinerary.js";
+import { addActivityToDay, groundActivityPlace, pickActivityFields } from "../lib/itinerary.js";
 import { bumpRevisionFor } from "../lib/revisions.js";
 
 // Membership is checked by requireTripMember before this runs, so req.trip is the verified trip.
@@ -11,12 +11,14 @@ export const addActivity = async (req, res, next) => {
     }
 
     const tripId = req.trip._id;
-    const { dayPlan, created } = await addActivityToDay({
-      tripId,
-      date,
-      section,
-      activity: pickActivityFields(req.body),
-    });
+    const activity = pickActivityFields(req.body);
+    // Clients may only create manual activities; "ai" and "template" are set by the server.
+    delete activity.source;
+    const place = await groundActivityPlace(req.body.place);
+    if (place) activity.place = place;
+    else delete activity.place;
+
+    const { dayPlan, created } = await addActivityToDay({ tripId, date, section, activity });
 
     // A repeat of an already-created activity (same clientRef) changes nothing, so nothing is emitted.
     if (created) {

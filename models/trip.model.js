@@ -73,7 +73,9 @@ const tripSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    // Structured destination beside the free-text `location`, resolved on first AI plan (ai-plan §3.1).
+    // Structured destination beside the free-text `location` (ai-plan §3.1). `location` stays what
+    // people see; `place` is resolved from it lazily (lib/tripPlace.js), or set directly when a trip
+    // is created from a template.
     place: {
       type: new mongoose.Schema(
         {
@@ -82,6 +84,8 @@ const tripSchema = new mongoose.Schema(
           address: String,
           lat: Number,
           lng: Number,
+          country: String,
+          admin1: String,
           types: [String],
         },
         { _id: false }
@@ -93,8 +97,20 @@ const tripSchema = new mongoose.Schema(
       enum: ["monsoon", "mountain", "coast", "desert", "heritage", "wild", "city"],
       default: undefined,
     },
+    // When the server last tried to resolve `place` from `location`. A location Google can't match
+    // is retried weekly at most, not on every open (lib/tripPlace.js).
+    placeLookupAt: { type: Date, default: undefined },
+    source: { type: String, enum: ["manual", "ai", "template"], default: undefined },
+    templateRef: { type: mongoose.Schema.Types.ObjectId, ref: "PlanTemplate", default: undefined },
+    // Idempotency key for a create that can be retried (template clone); unique per creator.
+    clientRef: { type: String, default: undefined },
   },
   { timestamps: true },
+)
+
+tripSchema.index(
+  { createdBy: 1, clientRef: 1 },
+  { unique: true, partialFilterExpression: { clientRef: { $type: "string" } } },
 )
 
 // Generate invite code automatically

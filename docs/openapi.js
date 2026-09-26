@@ -95,6 +95,24 @@ const proposalIdParameter = {
   schema: schemaRef("MongoId"),
 };
 
+const quotaErrors = {
+  ...standardErrors,
+  429: jsonResponse(
+    "Rate limited, or the user's daily quota for this call is spent. A spent quota carries `code: QUOTA_EXCEEDED` and `retryAfterSeconds` until midnight UTC.",
+    schemaRef("Error"),
+  ),
+  502: jsonResponse("Google Maps or the weather service couldn't be reached.", schemaRef("Error")),
+  503: jsonResponse("Google Maps isn't configured on this server (`code: PLACES_NOT_CONFIGURED`).", schemaRef("Error")),
+};
+
+const templateSlugParameter = {
+  name: "slug",
+  in: "path",
+  required: true,
+  schema: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+  example: "goa-4-days-beaches-and-old-goa",
+};
+
 const insufficientCredits = jsonResponse(
   "Not enough credits. The body carries `code: INSUFFICIENT_CREDITS`, `needed` and `available`.",
   schemaRef("Error"),
@@ -151,6 +169,12 @@ Creating an expense, a message, an activity or a file record accepts a \`clientR
 
 Every write bumps a counter for the section it changed and emits one generic \`trip_changed\` socket event carrying \`{ tripId, section, rev }\`. On reconnect and on foreground, call \`GET /sync/{tripId}/rev\` once and refetch only the sections whose number moved. Do not poll.
 
+### Places, maps and weather
+
+Google Maps is reached only through this API; the key never ships in a client. Place search, place details, photos, static maps and weather each have a per-user **daily quota** on top of the rate limit, spent only when the server actually calls Google or Open-Meteo — cached answers are free. Image endpoints (\`/places/photo/*\`, \`/places/static-map\`) need the same bearer token as every other route, so pass it as an image request header.
+
+A trip's \`place\` is resolved from its free-text \`location\` the first time it's opened, together with its \`theme\`. Clients receive both on the next trip fetch (the \`trip\` revision moves).
+
 ### File delivery
 
 Trip documents are stored as authenticated Cloudinary assets and have **no permanent URL**. The \`url\` on a file is a signed link that expires in ten minutes; \`GET /files/{fileId}/url\` mints another. Images the UI renders directly — trip covers, activity photos, profile pictures — must be uploaded with \`?scope=public\` to keep a durable URL.
@@ -169,6 +193,9 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
     { name: "Credits", description: "AI credit balance and ledger." },
     { name: "Sync", description: "Per-section revision counters for reconnect and foreground catch-up." },
     { name: "Devices", description: "Expo push token registration." },
+    { name: "Places", description: "Google Places search, details, photos and static maps, proxied with per-user daily quotas." },
+    { name: "Weather", description: "Daily forecast, or typical weather for dates beyond the forecast, from Open-Meteo." },
+    { name: "Templates", description: "Pre-made itineraries to browse and clone into a new trip." },
   ],
   security: [{ ClerkBearerAuth: [] }],
   paths: {
@@ -1356,6 +1383,172 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
         },
       },
     },
+    "/places/search": {
+      get: {
+        tags: ["Places"],
+        operationId: "searchPlaces",
+        summary: "Search places for the place picker",
+        description:
+          "Text search, biased toward `near` when given. Debounce on the client: every uncached query spends one unit of the `placesSearch` daily quota.",
+        parameters: [
+          { name: "q", in: "query", required: true, schema: { type: "string", minLength: 2, maxLength: 120 }, example: "fort aguada" },
+          {
+            name: "near",
+            in: "query",
+            required: false,
+            description: "`lat,lng` to bias results toward, usually the trip's `place`.",
+            schema: { type: "string", pattern: "^-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?$" },
+            example: "15.4909,73.8278",
+          },
+        ],
+        responses: {
+          200: jsonResponse(
+            "Up to 8 matches.",
+            successEnvelope({ type: "array", items: schemaRef("PlaceResult") }, { count: { type: "integer" } }),
+          ),
+          ...quotaErrors,
+        },
+      },
+    },
+    "/places/static-map": {
+      get: {
+        tags: ["Places"],
+        operationId: "getStaticMap",
+        summary: "A static map image of one or more stops",
+        description:
+          "PNG at 2× scale with numbered markers in order, joined by a line when there's more than one stop. Cached per stop-set, size and theme for a day; only a cache miss spends the `staticMap` quota.",
+        parameters: [
+          { name: "stops", in: "query", required: true, description: "Up to 12 `lat,lng` pairs separated by `|`.", schema: { type: "string" }, example: "15.4920,73.7737|15.5057,73.7640" },
+          { name: "w", in: "query", required: false, description: "Width in points, 80–640.", schema: { type: "integer", default: 640 } },
+          { name: "h", in: "query", required: false, description: "Height in points, 80–640.", schema: { type: "integer", default: 240 } },
+          { name: "theme", in: "query", required: false, schema: { type: "string", enum: ["light", "dark"], default: "light" } },
+        ],
+        responses: {
+          200: { description: "The map image.", content: { "image/png": { schema: { type: "string", format: "binary" } } } },
+          ...quotaErrors,
+        },
+      },
+    },
+    "/places/photo/{photoRef}": {
+      get: {
+        tags: ["Places"],
+        operationId: "getPlacePhoto",
+        summary: "A place photo",
+        description:
+          "Redirects (302) to a short-lived image URL on Google's CDN, which carries no key. Show the photo's `attributions` wherever it appears.",
+        parameters: [
+          {
+            name: "photoRef",
+            in: "path",
+            required: true,
+            description: "The photo's resource name, including its slashes.",
+            schema: { type: "string", pattern: "^places/[A-Za-z0-9_-]+/photos/[A-Za-z0-9_-]+$" },
+          },
+          { name: "w", in: "query", required: false, description: "Desired width; snapped to 200, 400, 800 or 1200.", schema: { type: "integer", default: 800 } },
+        ],
+        responses: {
+          302: { description: "Redirect to the image." },
+          ...quotaErrors,
+        },
+      },
+    },
+    "/places/{placeId}": {
+      get: {
+        tags: ["Places"],
+        operationId: "getPlaceDetails",
+        summary: "One place, with photos and their attributions",
+        description: "Served from the place cache when it's fresh; otherwise one Place Details call against the `placesDetails` quota.",
+        parameters: [{ name: "placeId", in: "path", required: true, description: "Google place ID.", schema: { type: "string" } }],
+        responses: {
+          200: jsonResponse("The place.", successEnvelope(schemaRef("PlaceDetails"))),
+          ...quotaErrors,
+        },
+      },
+    },
+    "/weather": {
+      get: {
+        tags: ["Weather"],
+        operationId: "getWeather",
+        summary: "Daily weather for a trip or a place",
+        description:
+          "Send `tripId` (members only) for every day of the trip, or `lat`, `lng`, `from` and `to` for up to 31 days. Days inside the 16-day forecast are `forecast`; later days are the same dates last year, marked `typical`. A trip whose location can't be placed returns `location: null` and no days.",
+        parameters: [
+          { name: "tripId", in: "query", required: false, schema: schemaRef("MongoId") },
+          { name: "lat", in: "query", required: false, schema: { type: "number" } },
+          { name: "lng", in: "query", required: false, schema: { type: "number" } },
+          { name: "from", in: "query", required: false, schema: { type: "string", format: "date" } },
+          { name: "to", in: "query", required: false, schema: { type: "string", format: "date" } },
+        ],
+        responses: {
+          200: jsonResponse("Weather per day.", successEnvelope(schemaRef("WeatherResponse"))),
+          ...quotaErrors,
+          403: { $ref: "#/components/responses/Forbidden" },
+        },
+      },
+    },
+    "/templates": {
+      get: {
+        tags: ["Templates"],
+        operationId: "listTemplates",
+        summary: "Browse plan templates",
+        description: "Featured first, then most cloned. Filters combine.",
+        parameters: [
+          { name: "theme", in: "query", required: false, schema: schemaRef("TripTheme") },
+          { name: "days", in: "query", required: false, description: "Exact length in days.", schema: { type: "integer", minimum: 1 } },
+          { name: "maxDays", in: "query", required: false, description: "Ignored when `days` is set.", schema: { type: "integer", minimum: 1 } },
+          { name: "budget", in: "query", required: false, schema: { type: "string", enum: ["budget", "mid", "premium"] } },
+          { name: "month", in: "query", required: false, description: "Only templates recommended for this month.", schema: { type: "integer", minimum: 1, maximum: 12 } },
+          { name: "featured", in: "query", required: false, schema: { type: "boolean" } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 50, default: 20 } },
+        ],
+        responses: {
+          200: jsonResponse(
+            "Matching templates, without their itineraries.",
+            successEnvelope({ type: "array", items: schemaRef("TemplateSummary") }, { count: { type: "integer" } }),
+          ),
+          ...standardErrors,
+        },
+      },
+    },
+    "/templates/{slug}": {
+      get: {
+        tags: ["Templates"],
+        operationId: "getTemplate",
+        summary: "One template with its day-by-day itinerary",
+        parameters: [templateSlugParameter],
+        responses: {
+          200: jsonResponse("The template.", successEnvelope(schemaRef("Template"))),
+          ...standardErrors,
+        },
+      },
+    },
+    "/templates/{slug}/clone": {
+      post: {
+        tags: ["Templates"],
+        operationId: "cloneTemplate",
+        summary: "Create a trip from a template",
+        description:
+          "Creates a trip owned by the caller, dated from `startDate` for the template's length, with every template activity on its day. Send a `clientRef` so a retried request returns the first trip (`200`) instead of making a second.",
+        parameters: [templateSlugParameter],
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            required: ["startDate"],
+            properties: {
+              startDate: { type: "string", format: "date" },
+              name: { type: "string", maxLength: 80, description: "Defaults to \"<destination> trip\"." },
+              ...clientRefProperty,
+            },
+          },
+          { startDate: "2026-12-18", name: "Goa with college friends", clientRef: "0b7c3c1e-3f9a-4b9a-9c55-1f0e4b1d8a21" },
+        ),
+        responses: {
+          201: jsonResponse("Trip created.", successEnvelope(schemaRef("Trip"))),
+          200: jsonResponse("A trip already exists for this `clientRef`.", successEnvelope(schemaRef("Trip"))),
+          ...standardErrors,
+        },
+      },
+    },
   },
   components: {
     securitySchemes: {
@@ -1375,6 +1568,172 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
       TooManyRequests: jsonResponse("Rate limit exceeded.", schemaRef("RateLimited")),
     },
     schemas: {
+      TripTheme: {
+        type: "string",
+        enum: ["monsoon", "mountain", "coast", "desert", "heritage", "wild", "city"],
+        description: "The trip's archetype for adaptive theming, derived on the server.",
+      },
+      TripPlace: {
+        type: "object",
+        description: "The trip's resolved destination. `location` remains the text people see.",
+        properties: {
+          placeId: { type: "string" },
+          name: { type: "string" },
+          address: { type: "string" },
+          lat: { type: "number" },
+          lng: { type: "number" },
+          country: { type: "string" },
+          admin1: { type: "string", description: "State or province." },
+          types: { type: "array", items: { type: "string" } },
+        },
+      },
+      ActivityPlace: {
+        type: "object",
+        description:
+          "A structured place on an activity. When `placeId` is one the search returned, the server replaces the other fields with its cached copy; a place without valid coordinates is dropped.",
+        required: ["lat", "lng"],
+        properties: {
+          placeId: { type: "string" },
+          name: { type: "string" },
+          address: { type: "string" },
+          lat: { type: "number" },
+          lng: { type: "number" },
+          types: { type: "array", items: { type: "string" } },
+          photoRef: { type: "string" },
+        },
+      },
+      PlaceResult: {
+        type: "object",
+        required: ["placeId", "name", "lat", "lng"],
+        properties: {
+          placeId: { type: "string" },
+          name: { type: "string" },
+          address: { type: "string" },
+          lat: { type: "number" },
+          lng: { type: "number" },
+          types: { type: "array", items: { type: "string" } },
+          photoRef: { type: ["string", "null"], description: "Pass to `GET /places/photo/{photoRef}`." },
+        },
+      },
+      PlacePhoto: {
+        type: "object",
+        properties: {
+          ref: { type: "string" },
+          width: { type: ["integer", "null"] },
+          height: { type: ["integer", "null"] },
+          attributions: {
+            type: "array",
+            description: "Must be shown with the photo.",
+            items: { type: "object", properties: { name: { type: "string" }, uri: { type: ["string", "null"] } } },
+          },
+        },
+      },
+      PlaceDetails: {
+        allOf: [
+          schemaRef("PlaceResult"),
+          {
+            type: "object",
+            properties: {
+              country: { type: ["string", "null"] },
+              admin1: { type: ["string", "null"] },
+              photos: { type: "array", items: schemaRef("PlacePhoto") },
+            },
+          },
+        ],
+      },
+      WeatherDay: {
+        type: "object",
+        required: ["date", "source"],
+        properties: {
+          date: { type: "string", format: "date" },
+          source: { type: "string", enum: ["forecast", "typical", "observed", "unavailable"] },
+          summary: { type: "string", example: "Light rain" },
+          tempMaxC: { type: ["number", "null"] },
+          tempMinC: { type: ["number", "null"] },
+          precipitationMm: { type: ["number", "null"] },
+          rainChancePct: { type: ["number", "null"], description: "Forecast days only." },
+          severe: { type: "boolean", description: "Heavy rain, a storm or extreme heat." },
+        },
+      },
+      WeatherResponse: {
+        type: "object",
+        required: ["location", "days"],
+        properties: {
+          location: {
+            type: ["object", "null"],
+            properties: {
+              name: { type: ["string", "null"] },
+              lat: { type: "number" },
+              lng: { type: "number" },
+              source: { type: "string", enum: ["place", "geocoder", "coordinates"] },
+              elevation: { type: ["number", "null"], description: "Metres." },
+            },
+          },
+          days: { type: "array", items: schemaRef("WeatherDay") },
+        },
+      },
+      TemplateSummary: {
+        type: "object",
+        required: ["_id", "slug", "title", "destination", "days", "theme", "budgetBand"],
+        properties: {
+          _id: schemaRef("MongoId"),
+          slug: { type: "string" },
+          title: { type: "string" },
+          summary: { type: "string" },
+          destination: {
+            type: "object",
+            properties: { name: { type: "string" }, region: { type: "string" }, country: { type: "string" } },
+          },
+          days: { type: "integer" },
+          nights: { type: "integer" },
+          theme: schemaRef("TripTheme"),
+          heroImage: {
+            type: "object",
+            properties: { photoRef: { type: "string" }, attributions: { type: "array", items: { type: "object" } } },
+          },
+          budgetBand: { type: "string", enum: ["budget", "mid", "premium"] },
+          estCostPerPerson: { type: "number", description: "INR on the ground, excluding travel to the destination." },
+          bestMonths: { type: "array", items: { type: "integer", minimum: 1, maximum: 12 } },
+          tags: { type: "array", items: { type: "string" } },
+          featured: { type: "boolean" },
+          usageCount: { type: "integer" },
+        },
+      },
+      TemplateActivity: {
+        type: "object",
+        required: ["section", "title", "type"],
+        properties: {
+          section: { type: "string", enum: ["Morning", "Afternoon", "Evening", "Night"] },
+          time: { type: "string", pattern: "^\\d{2}:\\d{2}$" },
+          title: { type: "string" },
+          type: schemaRef("ActivityType"),
+          place: schemaRef("ActivityPlace"),
+          durationMin: { type: "integer" },
+          estCost: { type: "number", description: "INR per person." },
+          notes: { type: "string" },
+        },
+      },
+      Template: {
+        allOf: [
+          schemaRef("TemplateSummary"),
+          {
+            type: "object",
+            properties: {
+              itinerary: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    day: { type: "integer", minimum: 1 },
+                    title: { type: "string" },
+                    activities: { type: "array", items: schemaRef("TemplateActivity") },
+                  },
+                },
+              },
+            },
+          },
+        ],
+      },
       AiStatus: {
         type: "object",
         properties: {
@@ -1724,6 +2083,10 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
           endDate: { type: "string", format: "date-time" },
           budget: schemaRef("Budget"),
           createdBy: { oneOf: [schemaRef("MongoId"), schemaRef("UserSummary")] },
+          place: schemaRef("TripPlace"),
+          theme: schemaRef("TripTheme"),
+          source: { type: "string", enum: ["manual", "ai", "template"] },
+          templateRef: schemaRef("MongoId"),
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
         },
@@ -1749,6 +2112,10 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
           notes: { type: "string" },
           attachment: { type: ["string", "null"] },
           isDone: { type: "boolean", default: false },
+          place: schemaRef("ActivityPlace"),
+          estCost: { type: "number", description: "Per person, in the trip currency." },
+          durationMin: { type: "integer" },
+          source: { type: "string", enum: ["manual", "ai", "template"] },
           comments: { type: "array", items: schemaRef("ActivityComment") },
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },

@@ -10,6 +10,9 @@ import aiRoutes from "../routes/ai.routes.js";
 import creditsRoutes from "../routes/credits.routes.js";
 import syncRoutes from "../routes/sync.routes.js";
 import deviceRoutes from "../routes/device.routes.js";
+import placesRoutes from "../routes/places.routes.js";
+import weatherRoutes from "../routes/weather.routes.js";
+import templateRoutes from "../routes/template.routes.js";
 import openApiDocument from "../docs/openapi.js";
 
 const routeGroups = [
@@ -25,10 +28,14 @@ const routeGroups = [
   ["/discussion", discussionRoutes],
   ["/sync", syncRoutes],
   ["/devices", deviceRoutes],
+  ["/places", placesRoutes],
+  ["/weather", weatherRoutes],
+  ["/templates", templateRoutes],
 ];
 
+// A param's own pattern (`:photoRef(*)`) isn't part of the documented path.
 const normalizeExpressPath = (path) =>
-  path.replace(/:([A-Za-z0-9_]+)/g, "{$1}");
+  path.replace(/:([A-Za-z0-9_]+)(\([^)]*\))?/g, "{$1}");
 
 const actualOperations = new Set();
 
