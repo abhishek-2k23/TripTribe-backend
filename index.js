@@ -30,6 +30,7 @@ import deviceRouter from './routes/device.routes.js';
 import placesRouter from './routes/places.routes.js';
 import weatherRouter from './routes/weather.routes.js';
 import templateRouter from './routes/template.routes.js';
+import homeRouter from './routes/home.routes.js';
 import scalarDocsRouter from './docs/scalar.js';
 import { serve as serveInngest } from 'inngest/express';
 import { inngest } from './lib/inngest.js';
@@ -155,6 +156,7 @@ app.use("/api/devices", deviceRouter);
 app.use("/api/places", placesRouter);
 app.use("/api/weather", weatherRouter);
 app.use("/api/templates", templateRouter);
+app.use("/api", homeRouter);
 
 app.get('/', (req, res) => {
   res.json({
