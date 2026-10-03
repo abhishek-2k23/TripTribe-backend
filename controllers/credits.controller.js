@@ -15,10 +15,11 @@ export const getCreditBalance = async (req, res, next) => {
 // GET /api/credits/ledger — newest first.
 export const getCreditLedger = async (req, res, next) => {
   try {
-    const entries = await CreditLedger.find({ user: req.user._id })
+    // Pool rows name this user as funder or spender but belong to the trip; the pool shows them.
+    const entries = await CreditLedger.find({ user: req.user._id, bucket: { $ne: "pool" } })
       .sort({ createdAt: -1 })
       .limit(100)
-      .select("bucket delta reason job note createdAt")
+      .select("bucket delta reason job trip productId note createdAt")
       .lean();
     res.json({ success: true, count: entries.length, data: entries });
   } catch (error) {
