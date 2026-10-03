@@ -1163,6 +1163,8 @@ Every action that calls Claude runs as a background job. The route validates the
 
 Credit costs: chat `1`, receipt `1`, packing list `2`, trip plan `20` for up to 5 days plus `4` per extra day (trips of up to 14 days). Every user gets 50 free credits a month; unused free credits don't roll over.
 
+Who pays: on a trip with a credit pool, an owner's or editor's job is paid from the pool when the pool covers the whole cost; otherwise it's paid from the requester's own credits: free first, then subscription, then packs. Viewers always use their own. Every `202` below includes `fundedBy: "user" | "pool"`, and a refund goes back to wherever the credits came from.
+
 Errors specific to AI routes:
 
 | Status | `code` | Meaning |
@@ -1186,7 +1188,7 @@ Conversations with the assistant. A thread can be linked to a trip (`tripId`), w
 ```
 
 - Omit `threadId` to start a new conversation (optionally about `tripId`).
-- `202`: `{ jobId, threadId, messageId, cost }`. The job's `result` is `{ threadId, messageId, reply, suggestions }`, and the reply is also saved to the thread.
+- `202`: `{ jobId, threadId, messageId, cost, fundedBy }`. The job's `result` is `{ threadId, messageId, reply, suggestions }`, and the reply is also saved to the thread.
 
 ### `POST /ai/packing-list`
 
@@ -1222,13 +1224,36 @@ Owner or editor. Marks the proposal dismissed.
 
 ## Credit routes
 
+Buckets: `free` (monthly grant, expires at the next grant), `sub` (monthly subscription, rolls over up to 600), `paid` (credit packs, never expire) and `pool` (a trip's shared credits). Store prices live in App Store Connect / Play Console; what each product grants lives in `config/products.js`.
+
 ### `GET /credits/balance`
 
-`{ free, paid, total, monthlyFreeCredits, freeResetsAt }`. Reading the balance writes this month's free grant if it hasn't been written yet.
+`{ free, subscription, paid, total, monthlyFreeCredits, freeResetsAt }`. Reading the balance writes this month's free grant if it hasn't been written yet. Pool credits aren't included; see `GET /trips/:tripId/credit-pool`.
 
 ### `GET /credits/ledger`
 
-The latest 100 ledger entries, newest first: `{ bucket, delta, reason, job, note, createdAt }`. Reasons are `grant`, `expire`, `hold`, `refund`, `purchase` and `adjustment`.
+The latest 100 entries of your own buckets, newest first: `{ bucket, delta, reason, job, trip, productId, note, createdAt }`. Reasons are `grant`, `expire`, `hold`, `refund`, `purchase`, `revoke` (the store refunded a purchase), `pool_allocate`, `pool_withdraw` and `adjustment`.
+
+### `POST /credits/grant`
+
+RevenueCat's webhook, not a client route. It's authenticated by an `Authorization` header that must equal `REVENUECAT_WEBHOOK_AUTH` exactly (compared in constant time), not by Clerk, and the rate limiter skips it.
+
+- `NON_RENEWING_PURCHASE`, `INITIAL_PURCHASE`, `RENEWAL`: grants the product's credits, keyed on `transaction_id`, so retries and one purchase arriving as two event types grant once. The user is `app_user_id` (the app logs RevenueCat in with the Mongo user id), falling back to `original_app_user_id` and `aliases`. Subscription renewals top up to the rollover cap and never go past it.
+- `CANCELLATION` with `cancel_reason: "CUSTOMER_SUPPORT"` (a store refund): takes the credits back. The bucket can go negative if they were already spent.
+- Everything else, unknown products and unknown users: `200` with `handled` saying why, so RevenueCat doesn't retry. Unknown users are logged loudly so support can grant by hand.
+- `401` wrong header · `503` `REVENUECAT_WEBHOOK_AUTH` unset · `500` our failure (RevenueCat retries).
+
+### `GET /trips/:tripId/credit-pool`
+
+Trip member. `{ balance, canSpend, canManage, entries }`: `canSpend` for owners and editors, `canManage` for the owner, and the latest 30 movements `{ user: { name, imageUrl }, delta, reason, job, createdAt }`.
+
+### `POST /trips/:tripId/credit-pool`
+
+Owner only. `{ "action": "allocate" | "withdraw", "amount": 50, "requestId": "<uuid>" }` → `{ balance }`. `requestId` is required, and retrying with the same one moves the credits once.
+
+- `allocate` moves purchased credits (subscription first, then packs) into the pool. Free monthly credits can't be pooled: `402` with a message saying how many purchased credits you have.
+- `withdraw` moves unspent pool credits back to you as pack credits. More than the pool holds: `400`.
+- Both bump the trip's `budget` revision.
 
 ## Sync routes
 

@@ -1323,6 +1323,94 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
         },
       },
     },
+    "/credits/grant": {
+      post: {
+        tags: ["Credits"],
+        operationId: "revenueCatWebhook",
+        summary: "RevenueCat webhook: grant store purchases as credits",
+        description:
+          "Called by RevenueCat, not by apps. Authenticated by the exact `Authorization` header value configured for the webhook in RevenueCat (server env `REVENUECAT_WEBHOOK_AUTH`). `NON_RENEWING_PURCHASE`, `INITIAL_PURCHASE` and `RENEWAL` grant the product's credits once per store transaction id; a `CANCELLATION` with `cancel_reason: CUSTOMER_SUPPORT` (a store refund) takes them back. Other events, unknown products and unknown users answer `200` with a `handled` note, so RevenueCat doesn't retry what can't succeed.",
+        security: [],
+        requestBody: jsonRequest({
+          type: "object",
+          required: ["event"],
+          properties: {
+            api_version: { type: "string" },
+            event: {
+              type: "object",
+              required: ["type"],
+              properties: {
+                id: { type: "string" },
+                type: { type: "string" },
+                product_id: { type: "string" },
+                transaction_id: { type: "string" },
+                app_user_id: { type: "string", description: "The Mongo user id the app logged RevenueCat in with." },
+                original_app_user_id: { type: "string" },
+                aliases: { type: "array", items: { type: "string" } },
+                environment: { type: "string", enum: ["SANDBOX", "PRODUCTION"] },
+                cancel_reason: { type: "string" },
+              },
+            },
+          },
+        }),
+        responses: {
+          200: jsonResponse(
+            "Handled or deliberately ignored.",
+            {
+              type: "object",
+              properties: {
+                success: { type: "boolean" },
+                handled: { type: "string", enum: ["test", "granted", "duplicate", "revoked", "unknown_product", "unknown_user", "ignored"] },
+                credits: { type: "integer" },
+              },
+            },
+          ),
+          400: { $ref: "#/components/responses/BadRequest" },
+          401: { $ref: "#/components/responses/Unauthorized" },
+          503: jsonResponse("Purchases aren't configured on this server.", schemaRef("Error")),
+          500: { $ref: "#/components/responses/ServerError" },
+        },
+      },
+    },
+    "/trips/{tripId}/credit-pool": {
+      get: {
+        tags: ["Credits"],
+        operationId: "getCreditPool",
+        summary: "A trip's shared credit pool",
+        description:
+          "Any member. Owners and editors spend the pool first when an AI job on this trip costs no more than what's in it; otherwise their own credits pay. Viewers always use their own.",
+        parameters: [tripIdParameter],
+        responses: {
+          200: jsonResponse("The pool.", successEnvelope(schemaRef("CreditPool"))),
+          ...roleErrors,
+        },
+      },
+      post: {
+        tags: ["Credits"],
+        operationId: "moveCreditPool",
+        summary: "Move credits into or out of the trip's pool",
+        description:
+          "Owner only. `allocate` moves purchased credits (subscription first, then packs) into the pool; free monthly credits can't be pooled (`402` if purchased credits don't cover it). `withdraw` returns unspent pool credits to the owner as pack credits. `requestId` makes a retried request move the credits once.",
+        parameters: [tripIdParameter],
+        requestBody: jsonRequest(
+          {
+            type: "object",
+            required: ["action", "amount", "requestId"],
+            properties: {
+              action: { type: "string", enum: ["allocate", "withdraw"] },
+              amount: { type: "integer", minimum: 1 },
+              requestId: { type: "string", maxLength: 100 },
+            },
+          },
+          { action: "allocate", amount: 100, requestId: "6b1f3c2e-8a4d-4b1e-9f0a-2c7d5e8f1a3b" },
+        ),
+        responses: {
+          200: jsonResponse("The pool's new balance.", successEnvelope({ type: "object", properties: { balance: { type: "integer" } } })),
+          402: jsonResponse("Not enough purchased credits to allocate.", schemaRef("Error")),
+          ...roleErrors,
+        },
+      },
+    },
     "/sync/{tripId}/rev": {
       get: {
         tags: ["Sync"],
@@ -2069,20 +2157,48 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
       CreditBalance: {
         type: "object",
         properties: {
-          free: { type: "integer" },
-          paid: { type: "integer" },
+          free: { type: "integer", description: "This month's free grant; expires at the start of next month." },
+          subscription: { type: "integer", description: "From the monthly subscription; rolls over up to twice the monthly amount." },
+          paid: { type: "integer", description: "From credit packs; never expires." },
           total: { type: "integer" },
           monthlyFreeCredits: { type: "integer" },
           freeResetsAt: { type: "string", format: "date-time" },
+        },
+      },
+      CreditPool: {
+        type: "object",
+        properties: {
+          balance: { type: "integer" },
+          canSpend: { type: "boolean", description: "The caller is an owner or editor." },
+          canManage: { type: "boolean", description: "The caller is the owner." },
+          entries: {
+            type: "array",
+            description: "Latest 30 movements, newest first.",
+            items: {
+              type: "object",
+              properties: {
+                user: schemaRef("UserSummary"),
+                delta: { type: "integer" },
+                reason: { type: "string", enum: ["pool_allocate", "pool_withdraw", "hold", "refund"] },
+                job: { oneOf: [schemaRef("MongoId"), { type: "null" }] },
+                createdAt: { type: "string", format: "date-time" },
+              },
+            },
+          },
         },
       },
       CreditLedgerEntry: {
         type: "object",
         properties: {
           _id: schemaRef("MongoId"),
-          bucket: { type: "string", enum: ["free", "paid"] },
+          bucket: { type: "string", enum: ["free", "sub", "paid"] },
           delta: { type: "number" },
-          reason: { type: "string", enum: ["grant", "expire", "hold", "refund", "purchase", "adjustment"] },
+          reason: {
+            type: "string",
+            enum: ["grant", "expire", "hold", "refund", "purchase", "revoke", "pool_allocate", "pool_withdraw", "adjustment"],
+          },
+          trip: { ...schemaRef("MongoId"), description: "Set on pool transfers." },
+          productId: { type: "string", description: "Set on purchases and revokes." },
           job: { anyOf: [schemaRef("MongoId"), { type: "null" }] },
           note: { type: "string" },
           createdAt: { type: "string", format: "date-time" },
