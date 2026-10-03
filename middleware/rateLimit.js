@@ -73,7 +73,10 @@ function createLimiter({ limit, keyBy = "user", skip = [], message }) {
 }
 
 /** Paths mounted under /api that carry their own limiter, so the general one leaves them alone. */
-const OWN_BUCKET = ["/sync", "/ai/jobs", "/users/sync", "/health", "/inngest"];
+// `/credits/grant` is RevenueCat's webhook: every call comes from its few servers, so a per-IP
+// budget would throttle real purchases. It checks a long shared secret before touching the
+// database, so it is left unlimited, like /inngest.
+const OWN_BUCKET = ["/sync", "/ai/jobs", "/users/sync", "/health", "/inngest", "/credits/grant"];
 
 /** Everything under /api that isn't listed above: counted per signed-in user. */
 export const apiLimiter = createLimiter({
