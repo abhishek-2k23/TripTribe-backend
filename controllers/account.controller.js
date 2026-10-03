@@ -138,6 +138,8 @@ export const deleteMyAccount = async (req, res, next) => {
         Message.deleteMany({ trip: { $in: deletedTripIds } }),
         ItineraryProposal.deleteMany({ trip: { $in: deletedTripIds } }),
         TripRevision.deleteMany({ trip: { $in: deletedTripIds } }),
+        // A deleted trip's credit pool goes with it (credits are forfeited, as below).
+        CreditLedger.deleteMany({ trip: { $in: deletedTripIds }, bucket: "pool" }),
         Trip.deleteMany({ _id: { $in: deletedTripIds } }),
       ]);
     }
@@ -156,7 +158,10 @@ export const deleteMyAccount = async (req, res, next) => {
       AiThread.deleteMany({ user: userId }),
       AiUpload.deleteMany({ user: userId }),
       AiJob.deleteMany({ user: userId }),
-      CreditLedger.deleteMany({ user: userId }),
+      // Personal buckets only. Pool rows this user funded or spent belong to trips that carry on
+      // without them; deleting those would change the pool balance for everyone else. They keep
+      // pointing at the anonymized user record.
+      CreditLedger.deleteMany({ user: userId, bucket: { $ne: "pool" } }),
       CreditAccount.deleteOne({ _id: userId }),
       // Push targets, or the phone keeps being woken for trips this account no longer has.
       Device.deleteMany({ user: userId }),

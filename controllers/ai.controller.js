@@ -20,6 +20,8 @@ import { addActivityToDay, tripDayIds } from "../lib/itinerary.js";
 import { bumpRevisionFor } from "../lib/revisions.js";
 
 const EDIT_ROLES = ["owner", "editor"];
+/** Viewers use their own credits; owners and editors may spend the trip's pool (ai-plan §8.3). */
+const poolFor = (trip, role) => (trip && EDIT_ROLES.includes(role) ? trip._id : null);
 const MAX_MESSAGE_LENGTH = 4000;
 const MAX_REQUEST_LENGTH = 2000;
 
@@ -171,9 +173,11 @@ export const sendChatMessage = async (req, res, next) => {
     }
 
     // Someone removed from a trip loses access to its context, even in an existing conversation.
+    let poolTripId = null;
     if (thread.trip) {
       const result = await loadMemberTrip(thread.trip, req.user._id);
       if (result.error) return fail(res, ...result.error);
+      poolTripId = poolFor(result.trip, result.role);
     }
 
     if (await AiJob.exists({ thread: thread._id, status: { $in: ["queued", "running"] } })) {
@@ -192,11 +196,12 @@ export const sendChatMessage = async (req, res, next) => {
       trip: thread.trip,
       thread: thread._id,
       cost: CREDIT_COST.chat,
+      poolTripId,
     });
 
     res.status(202).json({
       success: true,
-      data: { jobId: job._id, threadId: thread._id, messageId: userMessage._id, cost: job.cost },
+      data: { jobId: job._id, threadId: thread._id, messageId: userMessage._id, cost: job.cost, fundedBy: job.fundedBy },
     });
   } catch (error) {
     // Without a job, the question would sit unanswered in the thread.
@@ -218,8 +223,9 @@ export const requestPackingList = async (req, res, next) => {
       kind: "packing",
       trip: result.trip._id,
       cost: CREDIT_COST.packing,
+      poolTripId: poolFor(result.trip, result.role),
     });
-    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost } });
+    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost, fundedBy: job.fundedBy } });
   } catch (error) {
     handleJobError(res, next, error);
   }
@@ -233,13 +239,16 @@ export const requestReceiptScan = async (req, res, next) => {
     }
 
     let tripRef = null;
+    let poolTripId = null;
     if (req.body?.tripId) {
       const result = await loadMemberTrip(req.body.tripId, req.user._id);
       if (result.error) return fail(res, ...result.error);
       tripRef = result.trip._id;
+      poolTripId = poolFor(result.trip, result.role);
     }
 
     const job = await createJob({
+      poolTripId,
       userId: req.user._id,
       kind: "receipt",
       input: { fileName: req.file.originalname?.slice(0, 120) ?? null },
@@ -253,7 +262,7 @@ export const requestReceiptScan = async (req, res, next) => {
           data: req.file.buffer,
         }),
     });
-    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost } });
+    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost, fundedBy: job.fundedBy } });
   } catch (error) {
     handleJobError(res, next, error);
   }
@@ -290,8 +299,9 @@ export const requestPlan = async (req, res, next) => {
       input: { request, days },
       trip: trip._id,
       cost: planCredits(days),
+      poolTripId: poolFor(trip, result.role),
     });
-    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost } });
+    res.status(202).json({ success: true, data: { jobId: job._id, cost: job.cost, fundedBy: job.fundedBy } });
   } catch (error) {
     handleJobError(res, next, error);
   }

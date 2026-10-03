@@ -42,6 +42,8 @@ const aiJobSchema = new mongoose.Schema(
     thread: { type: mongoose.Schema.Types.ObjectId, ref: "AiThread", default: null },
     input: { type: mongoose.Schema.Types.Mixed, default: {} },
     cost: { type: Number, required: true },
+    // Whose credits paid: the requester's own, or the trip's shared pool (ai-plan §8.3).
+    fundedBy: { type: String, enum: ["user", "pool"], default: "user" },
     steps: [stepSchema],
     result: { type: mongoose.Schema.Types.Mixed, default: null },
     proposal: { type: mongoose.Schema.Types.ObjectId, ref: "ItineraryProposal", default: null },
