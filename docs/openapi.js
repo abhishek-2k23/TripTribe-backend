@@ -252,7 +252,7 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
         operationId: "deleteMyAccount",
         summary: "Delete the current user's account",
         description:
-          "Anonymizes the local user (name becomes \"Deleted user\"; email, photo and Clerk id are erased), deletes their messages, activity comments, checklist ticks and uploaded files, deletes trips where they are the only member, transfers ownership of shared trips to the longest-standing editor (or member), keeps shared expense records attributed to the anonymized user, then deletes the Clerk user. Responds 502 with the summary if only the Clerk deletion failed; signing in again and repeating the call finishes it.",
+          "Anonymizes the local user (name becomes \"Deleted user\"; email, photo and Clerk id are erased), deletes their messages, activity comments, checklist ticks and uploaded files, deletes trips where they are the only member, transfers ownership of shared trips to the longest-standing editor (or member), keeps shared expense records attributed to the anonymized user, deletes their AI conversations, jobs, the plans they requested and their push devices, forfeits their credits, then deletes the Clerk user. Responds 502 with the summary if only the Clerk deletion failed; signing in again and repeating the call finishes it.",
         responses: {
           200: jsonResponse("Account deleted.", {
             type: "object",
@@ -1040,6 +1040,21 @@ Trip documents are stored as authenticated Cloudinary assets and have **no perma
         parameters: [{ name: "tripId", in: "query", required: false, schema: schemaRef("MongoId") }],
         responses: {
           200: jsonResponse("Conversations.", successEnvelope({ type: "array", items: schemaRef("AiThread") })),
+          ...standardErrors,
+        },
+      },
+    },
+    "/ai/threads/{threadId}": {
+      delete: {
+        tags: ["AI"],
+        operationId: "deleteAiThread",
+        summary: "Delete one of your conversations",
+        description:
+          "Deletes the conversation and its messages. Its jobs are kept for the credit ledger and cost tracking, with a chat job's question and reply erased.",
+        parameters: [threadIdParameter],
+        responses: {
+          200: jsonResponse("Conversation deleted.", schemaRef("MessageResponse")),
+          409: jsonResponse("A reply is still being written for this conversation.", schemaRef("Error")),
           ...standardErrors,
         },
       },

@@ -5,6 +5,7 @@ import {
   acceptProposal,
   cancelJob,
   createThread,
+  deleteThread,
   getAiStatus,
   getJob,
   getProposal,
@@ -46,6 +47,7 @@ router.get("/status", protect, getAiStatus);
 router.post("/threads", protect, requireAi, createThread);
 router.get("/threads", protect, listThreads);
 router.get("/threads/:threadId/messages", protect, getThreadMessages);
+router.delete("/threads/:threadId", protect, deleteThread);
 
 router.post("/chat", protect, requireAi, sendChatMessage);
 router.post("/packing-list", protect, requireAi, requestPackingList);

@@ -129,6 +129,30 @@ export const listThreads = async (req, res, next) => {
   }
 };
 
+// DELETE /api/ai/threads/:threadId
+export const deleteThread = async (req, res, next) => {
+  try {
+    const { threadId } = req.params;
+    if (!validId(threadId)) return fail(res, 400, "Invalid thread id");
+    const thread = await AiThread.findOne({ _id: threadId, user: req.user._id }).select("_id").lean();
+    if (!thread) return fail(res, 404, "Conversation not found");
+    // The job would finish by writing its reply into a conversation that no longer exists.
+    if (await AiJob.exists({ thread: threadId, status: { $in: ["queued", "running"] } })) {
+      return fail(res, 409, "A reply is still being written. Delete the conversation once it's done.");
+    }
+
+    await AiMessage.deleteMany({ thread: threadId });
+    // Jobs stay as the record behind the credit ledger and cost tracking, minus what was said in
+    // them. A plan job's request also lives on its proposal, which belongs to the trip.
+    await AiJob.updateMany({ thread: threadId, kind: "chat" }, { $set: { input: {}, result: null }, $unset: { thread: 1 } });
+    await AiJob.updateMany({ thread: threadId }, { $unset: { thread: 1 } });
+    await AiThread.deleteOne({ _id: threadId });
+    res.json({ success: true, message: "Conversation deleted" });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // GET /api/ai/threads/:threadId/messages
 export const getThreadMessages = async (req, res, next) => {
   try {

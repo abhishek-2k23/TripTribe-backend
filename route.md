@@ -1177,9 +1177,11 @@ Errors specific to AI routes:
 
 Which AI features this server has, which job runner it uses (`inngest` or `inline`), and the credit costs.
 
-### `POST /ai/threads` · `GET /ai/threads` · `GET /ai/threads/:threadId/messages`
+### `POST /ai/threads` · `GET /ai/threads` · `GET /ai/threads/:threadId/messages` · `DELETE /ai/threads/:threadId`
 
 Conversations with the assistant. A thread can be linked to a trip (`tripId`), which gives the assistant the trip's details; you must be a member. `GET /ai/threads` accepts an optional `?tripId=` filter. The messages response also carries `activeJob` — the reply still being written, or `null` — so a client that left mid-reply can resume polling.
+
+`DELETE` removes your own conversation and its messages (`404` for anyone else's, `409` while a reply is still being written). Its jobs stay, for the credit ledger and cost tracking, with a chat job's question and reply erased (design.md D-088).
 
 ### `POST /ai/chat`
 
