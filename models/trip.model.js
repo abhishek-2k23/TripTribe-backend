@@ -87,6 +87,8 @@ const tripSchema = new mongoose.Schema(
           country: String,
           admin1: String,
           types: [String],
+          // When this copy came from Google; lib/placeFreshness.js refreshes or strips it after 30 days.
+          fetchedAt: Date,
         },
         { _id: false }
       ),

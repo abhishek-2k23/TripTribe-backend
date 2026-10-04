@@ -1,5 +1,6 @@
 import Itinerary from "../models/Itinerary.model.js";
 import { addActivityToDay, groundActivityPlace, pickActivityFields } from "../lib/itinerary.js";
+import { refreshItineraryPlaces } from "../lib/placeFreshness.js";
 import { bumpRevisionFor } from "../lib/revisions.js";
 
 // Membership is checked by requireTripMember before this runs, so req.trip is the verified trip.
@@ -157,6 +158,9 @@ export const getTripItinerary = async (req, res, next) => {
         itinerary: itinerary,             
         existingSections: Array.from(sectionTitles)} 
       });
+
+    // Places the 30-day sweep cut back to their ID are looked up again; clients refetch on the bump.
+    refreshItineraryPlaces({ tripId, days: itinerary, userId: req.user._id, io: req.app.get("socketio") });
   } catch (error) {
     console.error("Error fetching itinerary:", error);
     next(error);

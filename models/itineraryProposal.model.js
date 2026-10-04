@@ -11,6 +11,7 @@ const placeSnapshotSchema = new mongoose.Schema(
     address: String,
     lat: Number,
     lng: Number,
+    fetchedAt: Date,
   },
   { _id: false }
 );

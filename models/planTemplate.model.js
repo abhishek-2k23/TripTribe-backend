@@ -25,6 +25,7 @@ const placeSchema = new mongoose.Schema(
     admin1: String,
     types: { type: [String], default: undefined },
     photoRef: String,
+    fetchedAt: Date,
   },
   { _id: false }
 );
@@ -75,6 +76,7 @@ const planTemplateSchema = new mongoose.Schema(
         {
           photoRef: String,
           attributions: [{ name: String, uri: String, _id: false }],
+          fetchedAt: Date,
         },
         { _id: false }
       ),

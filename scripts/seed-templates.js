@@ -56,6 +56,7 @@ const activityPlace = (match) => ({
   lng: match.lng,
   types: match.types.slice(0, 6),
   photoRef: match.photos?.[0]?.ref,
+  fetchedAt: new Date(),
 });
 
 /** The data file's template, carrying over places an earlier run already resolved. */
@@ -92,7 +93,7 @@ async function resolvePlaces(template) {
     if (match) {
       destination.place = destinationSnapshot(match);
       const photo = match.photos?.[0];
-      if (photo) template.heroImage = { photoRef: photo.ref, attributions: photo.attributions };
+      if (photo) template.heroImage = { photoRef: photo.ref, attributions: photo.attributions, fetchedAt: new Date() };
     } else {
       problems.push(`${template.slug}: destination "${destination.query}" didn't resolve`);
     }

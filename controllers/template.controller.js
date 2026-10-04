@@ -6,6 +6,7 @@ import Itinerary from "../models/Itinerary.model.js";
 import PlanTemplate from "../models/planTemplate.model.js";
 import Trip from "../models/trip.model.js";
 import { normalizeDayKey } from "../lib/itinerary.js";
+import { refreshTemplatePlaces } from "../lib/placeFreshness.js";
 import { THEMES } from "../lib/theme.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -71,6 +72,9 @@ export const getTemplate = async (req, res, next) => {
     if (!template) return fail(res, 404, "Template not found");
     res.set("Cache-Control", "private, max-age=300");
     res.json({ success: true, data: template });
+
+    // Places and the photo the 30-day sweep stripped come back for the next viewer.
+    refreshTemplatePlaces(template, req.user._id);
   } catch (error) {
     next(error);
   }
@@ -101,6 +105,7 @@ function itineraryFor(template, tripId, startMs) {
             lng: activity.place.lng,
             types: activity.place.types,
             photoRef: activity.place.photoRef,
+            fetchedAt: activity.place.fetchedAt,
           }
         : undefined;
       section.activities.push({

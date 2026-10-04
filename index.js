@@ -36,6 +36,7 @@ import { serve as serveInngest } from 'inngest/express';
 import { inngest } from './lib/inngest.js';
 import { inngestFunctions } from './lib/ai/functions.js';
 import { recoverStaleJobs } from './lib/ai/jobs.js';
+import { startPlaceSweep } from './lib/placeFreshness.js';
 
 dotenv.config();
 
@@ -175,6 +176,7 @@ server.listen(PORT, () => {
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🚦 ${describeRateLimits()}`);
   recoverStaleJobs().catch((error) => console.error('AI job recovery failed:', error));
+  startPlaceSweep();
 });
 
 export default app;

@@ -25,6 +25,8 @@ const activitySchema = new mongoose.Schema({
         types: { type: [String], default: undefined },
         // A Places photo resource name, served through GET /api/places/photo/*.
         photoRef: String,
+        // When this copy came from Google; lib/placeFreshness.js refreshes or strips it after 30 days.
+        fetchedAt: Date,
       },
       { _id: false }
     ),
