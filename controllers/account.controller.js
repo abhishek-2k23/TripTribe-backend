@@ -158,6 +158,9 @@ export const deleteMyAccount = async (req, res, next) => {
       AiThread.deleteMany({ user: userId }),
       AiUpload.deleteMany({ user: userId }),
       AiJob.deleteMany({ user: userId }),
+      // Plans they asked for in trips that carry on. Accepted activities are already ordinary
+      // itinerary entries; what goes is their request text and the unreviewed rest.
+      ItineraryProposal.deleteMany({ createdBy: userId }),
       // Personal buckets only. Pool rows this user funded or spent belong to trips that carry on
       // without them; deleting those would change the pool balance for everyone else. They keep
       // pointing at the anonymized user record.
