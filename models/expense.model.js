@@ -90,10 +90,24 @@ const expenseSchema = new mongoose.Schema(
   expenseDate: {
     type: Date,
     default: Date.now
+  },
+
+  // Idempotency key from the creating client (design.md D-021). A replayed offline write carrying
+  // the same key returns the original expense instead of adding a second one.
+  clientRef: {
+    type: String,
+    default: undefined
   }
 
 },
 { timestamps: true }
+);
+
+// Unique per trip, and only for documents that actually carry a key — a plain `sparse` compound
+// index would still index every expense that has a `trip`, which is all of them.
+expenseSchema.index(
+  { trip: 1, clientRef: 1 },
+  { unique: true, partialFilterExpression: { clientRef: { $type: "string" } } }
 );
 
 export default mongoose.model("Expense", expenseSchema);

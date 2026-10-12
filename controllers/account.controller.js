@@ -16,6 +16,16 @@ import Expense from "../models/expense.model.js";
 import Checklist from "../models/checklist.model.js";
 import File from "../models/file.model.js";
 import Message from "../models/message.model.js";
+import AiThread from "../models/aiThread.model.js";
+import AiMessage from "../models/aiMessage.model.js";
+import AiJob from "../models/aiJob.model.js";
+import AiUpload from "../models/aiUpload.model.js";
+import ItineraryProposal from "../models/itineraryProposal.model.js";
+import CreditLedger from "../models/creditLedger.model.js";
+import CreditAccount from "../models/creditAccount.model.js";
+import Device from "../models/device.model.js";
+import TripRevision from "../models/tripRevision.model.js";
+import UsageCounter from "../models/usageCounter.model.js";
 
 const DELETED_NAME = "Deleted user";
 
@@ -23,22 +33,38 @@ const DELETED_NAME = "Deleted user";
  * Best-effort Cloudinary cleanup. Uploads use `resource_type: "auto"`, so images and PDFs are
  * stored as "image", videos as "video", and anything else as "raw". A failure is logged and
  * skipped: a leftover asset must not block someone's account deletion.
+ *
+ * Documents are stored as `authenticated` and cover images as `upload`, and destroy will not find
+ * an asset under the wrong delivery type, so both are tried for records written before that
+ * distinction existed (design.md D-012).
  */
 async function destroyAssets(assets) {
   let destroyed = 0;
-  for (const { public_id, fileType } of assets) {
+  for (const { public_id, fileType, resourceType, deliveryType } of assets) {
     if (!public_id) continue;
-    const resourceTypes = fileType?.startsWith("video/") ? ["video"] : ["image", "raw"];
+
+    const resourceTypes = resourceType
+      ? [resourceType]
+      : fileType?.startsWith("video/")
+        ? ["video"]
+        : ["image", "raw"];
+    const deliveryTypes = deliveryType ? [deliveryType] : ["authenticated", "upload"];
+
+    let done = false;
     for (const resource_type of resourceTypes) {
-      try {
-        const result = await cloudinary.uploader.destroy(public_id, { resource_type });
-        if (result?.result === "ok") {
-          destroyed += 1;
-          break;
+      for (const type of deliveryTypes) {
+        try {
+          const result = await cloudinary.uploader.destroy(public_id, { resource_type, type });
+          if (result?.result === "ok") {
+            destroyed += 1;
+            done = true;
+            break;
+          }
+        } catch (error) {
+          console.warn(`Cloudinary destroy failed for ${public_id} (${resource_type}/${type}):`, error?.message);
         }
-      } catch (error) {
-        console.warn(`Cloudinary destroy failed for ${public_id} (${resource_type}):`, error?.message);
       }
+      if (done) break;
     }
   }
   return destroyed;
@@ -66,6 +92,7 @@ export const deleteMyAccount = async (req, res, next) => {
     filesDeleted: 0,
     expensesKept: 0,
     assetsDestroyed: 0,
+    aiConversationsDeleted: 0,
     signInAccountDeleted: false,
   };
 
@@ -99,7 +126,7 @@ export const deleteMyAccount = async (req, res, next) => {
     }
 
     if (deletedTripIds.length > 0) {
-      const tripFiles = await File.find({ tripId: { $in: deletedTripIds } }).select("public_id fileType");
+      const tripFiles = await File.find({ tripId: { $in: deletedTripIds } }).select("public_id fileType resourceType deliveryType");
       summary.assetsDestroyed += await destroyAssets([...tripFiles, ...deletedCovers]);
 
       await Promise.all([
@@ -109,16 +136,42 @@ export const deleteMyAccount = async (req, res, next) => {
         Checklist.deleteMany({ tripId: { $in: deletedTripIds.map(String) } }),
         File.deleteMany({ tripId: { $in: deletedTripIds } }),
         Message.deleteMany({ trip: { $in: deletedTripIds } }),
+        ItineraryProposal.deleteMany({ trip: { $in: deletedTripIds } }),
+        TripRevision.deleteMany({ trip: { $in: deletedTripIds } }),
+        // A deleted trip's credit pool goes with it (credits are forfeited, as below).
+        CreditLedger.deleteMany({ trip: { $in: deletedTripIds }, bucket: "pool" }),
         Trip.deleteMany({ _id: { $in: deletedTripIds } }),
       ]);
     }
 
     // 2. The user's own content in trips that continue without them.
-    const ownFiles = await File.find({ uploadedBy: userId }).select("public_id fileType");
+    const ownFiles = await File.find({ uploadedBy: userId }).select("public_id fileType resourceType deliveryType");
     summary.assetsDestroyed += await destroyAssets(ownFiles);
     summary.filesDeleted = (await File.deleteMany({ uploadedBy: userId })).deletedCount;
 
     summary.messagesDeleted = (await Message.deleteMany({ sender: userId })).deletedCount;
+
+    // AI conversations, jobs, pending receipt photos and credits. Credits are forfeited.
+    const aiThreadIds = (await AiThread.find({ user: userId }).select("_id").lean()).map((t) => t._id);
+    await Promise.all([
+      AiMessage.deleteMany({ $or: [{ thread: { $in: aiThreadIds } }, { user: userId }] }),
+      AiThread.deleteMany({ user: userId }),
+      AiUpload.deleteMany({ user: userId }),
+      AiJob.deleteMany({ user: userId }),
+      // Plans they asked for in trips that carry on. Accepted activities are already ordinary
+      // itinerary entries; what goes is their request text and the unreviewed rest.
+      ItineraryProposal.deleteMany({ createdBy: userId }),
+      // Personal buckets only. Pool rows this user funded or spent belong to trips that carry on
+      // without them; deleting those would change the pool balance for everyone else. They keep
+      // pointing at the anonymized user record.
+      CreditLedger.deleteMany({ user: userId, bucket: { $ne: "pool" } }),
+      CreditAccount.deleteOne({ _id: userId }),
+      // Push targets, or the phone keeps being woken for trips this account no longer has.
+      Device.deleteMany({ user: userId }),
+      // Daily quota counters; they expire on their own within two days, but hold the user id until then.
+      UsageCounter.deleteMany({ user: userId }),
+    ]);
+    summary.aiConversationsDeleted = aiThreadIds.length;
 
     await Itinerary.updateMany(
       { "sections.activities.comments.user": userId },
@@ -181,7 +234,7 @@ export const exportMyData = async (req, res, next) => {
     const userId = user._id;
     const userIdString = userId.toString();
 
-    const [trips, messages, expenses, files, itineraries, checklists] = await Promise.all([
+    const [trips, messages, expenses, files, itineraries, checklists, aiThreads, aiMessages, creditLedger] = await Promise.all([
       Trip.find({ "members.user": userId })
         .select("name location description startDate endDate members createdAt")
         .lean(),
@@ -194,6 +247,9 @@ export const exportMyData = async (req, res, next) => {
       File.find({ uploadedBy: userId }).select("tripId name category notes url fileType size createdAt").lean(),
       Itinerary.find({ "sections.activities.comments.user": userId }).select("trip date sections").lean(),
       Checklist.find({ "categories.items.completedBy": userId }).select("tripId categories").lean(),
+      AiThread.find({ user: userId }).select("trip title createdAt").lean(),
+      AiMessage.find({ user: userId }).select("thread role content createdAt").sort({ createdAt: 1 }).lean(),
+      CreditLedger.find({ user: userId }).select("bucket delta reason note createdAt").sort({ createdAt: 1 }).lean(),
     ]);
 
     // Only this user's own data: roles instead of full rosters, own shares instead of everyone's.
@@ -252,6 +308,11 @@ export const exportMyData = async (req, res, next) => {
             expense.splitDetails.find((s) => s.user.toString() === userIdString) ?? null,
         })),
         files,
+        aiConversations: aiThreads.map((thread) => ({
+          ...thread,
+          messages: aiMessages.filter((m) => m.thread.toString() === thread._id.toString()),
+        })),
+        credits: creditLedger,
       },
     });
   } catch (error) {

@@ -1,12 +1,15 @@
 import mongoose from "mongoose";
 import Expense from "../models/expense.model.js";
-import Trip from "../models/trip.model.js";
+import { createIdempotent, readClientRef } from "../lib/idempotency.js";
+import { bumpRevisionFor } from "../lib/revisions.js";
 
 
+// Membership and role are checked by requireTripMember before each of these runs, so `req.trip` is
+// the verified trip. The body's own trip id is ignored: pairing someone else's trip id with a trip
+// you belong to must not write across the boundary.
 export const addExpense = async (req, res, next) => {
   try {
     const {
-      selectedTripId: tripId,
       title,
       description,
       amount,
@@ -17,15 +20,8 @@ export const addExpense = async (req, res, next) => {
     } = req.body;
 
     const recorder = req.user._id;
-    console.log(req.body);
-    console.log(tripId);
-    const trip = await Trip.findById(tripId);
-    if (!trip) {
-      return res.status(404).json({
-        success: false,
-        message: "Trip not found"
-      });
-    }
+    const trip = req.trip;
+    const tripId = trip._id;
 
     const payer = payerId || recorder;
 
@@ -65,29 +61,38 @@ export const addExpense = async (req, res, next) => {
       splitDetails = [];
     }
 
-    const expense = await Expense.create({
-      trip: tripId,
-      title,
-      description,
-      amount,
-      category,
-      paidBy: payer,
-      recordedBy: recorder,
-      splitType,
-      participants: uniqueParticipants,
-      splitDetails
+    // A replayed offline write carrying the same clientRef returns the original (D-021).
+    const { document: expense, created } = await createIdempotent(Expense, {
+      scope: { trip: tripId },
+      clientRef: readClientRef(req.body),
+      data: {
+        trip: tripId,
+        title,
+        description,
+        amount,
+        category,
+        paidBy: payer,
+        recordedBy: recorder,
+        splitType,
+        participants: uniqueParticipants,
+        splitDetails
+      }
     });
 
     const populatedExpense = await expense.populate([
   { path: "paidBy", select: "name imageUrl" },
   { path: "participants", select: "name imageUrl" }
 ]);
-    const io = req.app.get("socketio");
-    if (io) {
-      io.to(tripId.toString()).emit("expense_added", populatedExpense);
+
+    if (created) {
+      const io = req.app.get("socketio");
+      io?.to(tripId.toString()).emit("expense_added", populatedExpense);
+      // The budget dashboard reads the same expenses, so both sections moved.
+      await bumpRevisionFor(req, tripId, "expenses");
+      await bumpRevisionFor(req, tripId, "budget");
     }
 
-    res.status(201).json({
+    res.status(created ? 201 : 200).json({
       success: true,
       data: expense
     });
@@ -99,20 +104,8 @@ export const addExpense = async (req, res, next) => {
 
 export const getTripDebts = async (req, res, next) => {
   try {
-    const { tripId } = req.params;
+    const tripId = req.trip._id;
     const userId = req.user._id;
-
-    const trip = await Trip.findOne({
-      _id: tripId,
-      "members.user": userId
-    });
-
-    if (!trip) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied"
-      });
-    }
 
     const expenses = await Expense.find({ trip: tripId })
       .populate("paidBy", "name email imageUrl")
@@ -166,7 +159,9 @@ export const getTripDebts = async (req, res, next) => {
 
     const totalDebt = debts.reduce((acc, curr) => acc + curr.amount, 0);
 
-    const yourBalance = balances[userId] || 0;
+    // `balances` is keyed by string id; `userId` is an ObjectId, so indexing with it directly always
+    // missed and every caller saw zero (ai-plan §5.5).
+    const yourBalance = balances[userId.toString()] || 0;
 
     const filtedDebts = debts.filter((d) => d.amount !== 0);
     res.status(200).json({
@@ -184,13 +179,31 @@ export const getTripDebts = async (req, res, next) => {
   }
 };
 
+/**
+ * Marking a debt paid is the creditor's call: they are the one who knows the money arrived. Before
+ * this check any signed-in user could clear anyone's debt on any trip (design.md D-012).
+ */
 export const settleDebt = async (req, res, next) => {
 
   try {
     const { expenseId, userId } = req.body;
 
+    if (!mongoose.isValidObjectId(expenseId)) {
+      return res.status(400).json({ success: false, message: "Invalid expense id" });
+    }
+
     const expense = await Expense.findById(expenseId);
-    console.log(expense);
+    if (!expense) {
+      return res.status(404).json({ success: false, message: "Expense not found" });
+    }
+
+    if (expense.paidBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the person who paid can mark this settled"
+      });
+    }
+
     const split = expense.splitDetails.find(
       s => s.user.toString() === userId
     );
@@ -205,6 +218,10 @@ export const settleDebt = async (req, res, next) => {
 
     await expense.save();
 
+    // Settling emits no socket event, so without this a member who was offline would keep showing
+    // a debt that is already paid (design.md D-010).
+    await bumpRevisionFor(req, expense.trip, "expenses");
+
     res.status(200).json({
       success: true,
       message: "Debt settled"
@@ -218,10 +235,8 @@ export const settleDebt = async (req, res, next) => {
 
 export const getBudgetDashboard = async (req, res, next) => {
   try {
-    const { tripId } = req.params;
-
-    const trip = await Trip.findById(tripId).select("budget");
-    if (!trip) return res.status(404).json({ success: false, message: "Trip not found" });
+    const trip = req.trip;
+    const tripId = trip._id;
 
     const stats = await Expense.aggregate([
       { $match: { trip: new mongoose.Types.ObjectId(tripId) } },

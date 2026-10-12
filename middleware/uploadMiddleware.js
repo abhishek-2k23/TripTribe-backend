@@ -1,14 +1,23 @@
 import multer from "multer";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
 import cloudinary from "../config/cloudinary.js";
+import { isPublicScope } from "../lib/files.js";
 
 const storage = new CloudinaryStorage({
   cloudinary,
   params: async (req, file) => {
-    console.log("Multer is sending file to Cloudinary:", file.originalname);
+    // Trip documents are uploaded as `authenticated`, so they are never served from a permanent
+    // public URL (design.md D-012). Images rendered straight from a URL stay public — see
+    // lib/files.js for why — and say so with `?scope=public`.
+    //
+    // The scope is read from the query string, not the body: with multipart, a body field is only
+    // parsed if it appears before the file part, and clients can't be relied on to order it.
+    const cover = isPublicScope(req.query?.scope ?? req.body?.scope);
+
     return {
       folder: "TripTribe",
       resource_type: "auto", // IMPORTANT → allows image, pdf, docs
+      type: cover ? "upload" : "authenticated",
       public_id: Date.now() + "-" + file.originalname,
     };
   },

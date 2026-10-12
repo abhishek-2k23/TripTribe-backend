@@ -1,46 +1,36 @@
 import Itinerary from "../models/Itinerary.model.js";
+import { addActivityToDay, groundActivityPlace, pickActivityFields } from "../lib/itinerary.js";
+import { refreshItineraryPlaces } from "../lib/placeFreshness.js";
+import { bumpRevisionFor } from "../lib/revisions.js";
+
+// Membership is checked by requireTripMember before this runs, so req.trip is the verified trip.
 export const addActivity = async (req, res, next) => {
   try {
-    const { tripId, section, date, title, time, location, type, notes, attachment } = req.body;
-    const newActivity = { title, time, location, type, notes, attachment };
-
-    // 1. Try to find the day first
-    let dayPlan = await Itinerary.findOne({ 
-        trip: tripId, 
-        date: new Date(date) 
-    });
-
-    if (!dayPlan) {
-      // CASE 1: Completely new day. Create Day -> Section -> Activity.
-      dayPlan = await Itinerary.create({
-        trip: tripId,
-        date: new Date(date),
-        sections: [{ section, activities: [newActivity] }]
-      });
-    } else {
-      // CASE 2: Day exists. Check if the Section (e.g., "Golden Pavilion Visit") exists.
-      const existingSection = dayPlan.sections.find(s => s.section === section);
-
-      if (existingSection) {
-        // Sub-case A: Section exists, just push the new activity into it.
-        existingSection.activities.push(newActivity);
-      } else {
-        // Sub-case B: It's a new section for an existing day.
-        dayPlan.sections.push({ section, activities: [newActivity] });
-      }
-      
-      await dayPlan.save();
+    const { section, date, title } = req.body;
+    if (!section || !date || !title) {
+      return res.status(400).json({ success: false, message: "section, date and title are required" });
     }
 
-    const io = req.app.get("socketio");
-      const roomName = tripId.toString(); 
+    const tripId = req.trip._id;
+    const activity = pickActivityFields(req.body);
+    // Clients may only create manual activities; "ai" and "template" are set by the server.
+    delete activity.source;
+    const place = await groundActivityPlace(req.body.place);
+    if (place) activity.place = place;
+    else delete activity.place;
 
-      console.log(`Emitting activity_added to room: ${roomName}`);
-      io.to(tripId).emit("activity_added", dayPlan);
+    const { dayPlan, created } = await addActivityToDay({ tripId, date, section, activity });
 
-    res.status(201).json({
+    // A repeat of an already-created activity (same clientRef) changes nothing, so nothing is emitted.
+    if (created) {
+      const io = req.app.get("socketio");
+      io?.to(tripId.toString()).emit("activity_added", dayPlan);
+      await bumpRevisionFor(req, tripId, "itinerary");
+    }
+
+    res.status(created ? 201 : 200).json({
       success: true,
-      message: "Activity added successfully",
+      message: created ? "Activity added successfully" : "Activity was already added",
       data: dayPlan
     });
   } catch (error) {
@@ -50,7 +40,15 @@ export const addActivity = async (req, res, next) => {
 
 export const toggleActivityStatus = async (req, res, next) => {
   try {
-    const { itineraryId, activityId, isDone, tripId } = req.body;
+    const { itineraryId, activityId, isDone } = req.body;
+    const tripId = req.trip._id.toString();
+
+    // "Make it so", never "flip it" (design.md D-022). A flip replayed twice from an offline queue
+    // undoes itself; an explicit value replayed any number of times lands on the same state.
+    // It was also previously possible to write `undefined` into the field by omitting it.
+    if (typeof isDone !== "boolean") {
+      return res.status(400).json({ success: false, message: "isDone must be true or false" });
+    }
 
     const updated = await Itinerary.findOneAndUpdate(
       { _id: itineraryId, "sections.activities._id": activityId },
@@ -64,6 +62,7 @@ export const toggleActivityStatus = async (req, res, next) => {
     // Emit to Socket Room
     const io = req.app.get("socketio");
     io.to(tripId).emit("activity_updated", updated);
+    await bumpRevisionFor(req, tripId, "itinerary");
 
     res.status(200).json({ success: true, data: updated });
   } catch (error) { next(error); }
@@ -88,6 +87,10 @@ export const addActivityComment = async (req, res, next) => {
       }
     ).populate("sections.activities.comments.user", "name imageUrl");
 
+    // A comment emits no socket event of its own, so the revision bump is the only thing that tells
+    // a reconnecting client the itinerary moved (design.md D-010).
+    await bumpRevisionFor(req, req.trip._id, "itinerary");
+
     res.status(200).json({ success: true, data: updated });
   } catch (error) {
     next(error);
@@ -96,7 +99,9 @@ export const addActivityComment = async (req, res, next) => {
 
 export const deleteActivity = async (req, res, next) => {
   try {
-    const { itineraryId, activityId, tripId } = req.params; // Ensure tripId is passed or fetched
+    const { itineraryId, activityId } = req.params;
+    // The trip comes from the itinerary day (requireTripMember), not the URL's tripId segment.
+    const tripId = req.trip._id.toString();
 
     const result = await Itinerary.findOneAndUpdate(
       { _id: itineraryId },
@@ -109,6 +114,7 @@ export const deleteActivity = async (req, res, next) => {
     // Emit to Socket Room
     const io = req.app.get("socketio");
     io.to(tripId).emit("activity_deleted", { itineraryId, activityId });
+    await bumpRevisionFor(req, req.trip._id, "itinerary");
 
     res.status(200).json({ success: true, data: result });
   } catch (error) { next(error); }
@@ -152,6 +158,9 @@ export const getTripItinerary = async (req, res, next) => {
         itinerary: itinerary,             
         existingSections: Array.from(sectionTitles)} 
       });
+
+    // Places the 30-day sweep cut back to their ID are looked up again; clients refetch on the bump.
+    refreshItineraryPlaces({ tripId, days: itinerary, userId: req.user._id, io: req.app.get("socketio") });
   } catch (error) {
     console.error("Error fetching itinerary:", error);
     next(error);
